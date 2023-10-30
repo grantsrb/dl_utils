@@ -138,3 +138,92 @@ def top_k_acc(preds, labels, k=5, as_tensor=False):
     if as_tensor:
         return acc
     return acc.item()
+
+def pad_list(arr, tot_len, fill_val=0, side="right"):
+    """
+    Pads the argued list to the goal length. Operates in place.
+
+    Args:
+        arr: list
+        tot_len: int
+            the length of the resulting array
+        fill_val: object
+            the value to use for the padding
+        side: str
+            pad on the left side or the right
+    Returns:
+        arr: list
+            the padded list
+    """
+    n_pad = tot_len - len(arr)
+    if n_pad<=0: return arr
+    if side=="right":
+        for _ in range(n_pad):
+            arr.append(fill_val)
+    else:
+        padding = [fill_val for _ in range(n_pad)]
+        arr = padding + arr
+    return arr
+
+def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
+    """
+    Pads the argued list to the goal length along a single dimension.
+
+    Args:
+        arr: numpy or torch tensor
+        tot_len: int
+            the length of the resulting array
+        fill_val: object
+            the value to use for the padding
+        side: str
+            pad on the left side or the right
+    Returns:
+        arr: list
+            the padded list
+    """
+    if dim<0: dim = len(arr.shape) + dim
+    n_pad = tot_len - arr.shape[dim]
+    if n_pad<=0: return arr
+    tup = (0,n_pad) if side=="right" else (n_pad, 0)
+    if type(arr)==type(np.zeros((1,))):
+        pad_tups = [
+            (0,0) if i!= dim else tup for i in range(len(arr.shape))
+        ]
+        arr = np.pad(arr, pad_tups, constant_values=fill_val)
+    elif type(arr)==type(torch.zeros(1)):
+        pad_tup = [0 for _ in range(2*len(arr.shape))]
+        pad_tup[2*dim+int(side=="right")] = n_pad
+        arr = np.pad(arr, tuple(pad_tup), value=fill_val)
+    return arr
+
+def generate_square_subsequent_mask(sz: int):
+    """
+    Generates an upper-triangular matrix of True, with Falses on
+    diag and lower triangle.
+
+    Returns:
+        BoolTensor (sz,sz)
+    """
+    #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
+    return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
+
+
+def arglast(mask, dim=None, axis=-1):
+    """
+    This function finds the index of the last max value along a given
+    dimension. torch.flip creates a copy of the tensor, so it's
+    actually not as efficient as using numpy's np.flip which only
+    returns a view.
+
+    Args:
+        mask: bool (B,N)
+        dim: int
+    Returns:
+        the index of the last true value along the dimension
+    """
+    if dim is None: dim = axis
+    if type(mask)==type(np.zeros(1)):
+        argmaxs = np.argmax(np.flip(mask, axis=dim), axis=dim)
+    else:
+        argmaxs = torch.argmax(torch.flip(mask, dims=(dim,)), dim=dim)
+    return mask.shape[dim] - argmaxs - 1

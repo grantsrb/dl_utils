@@ -2,6 +2,87 @@ import math
 import torch.nn as nn
 import torch
 
+DEVICES = {
+    -1: "cpu", **{i:i for i in range(10)}
+}
+
+def get_fcnet(inpt_size,
+              outp_size,
+              n_layers=2,
+              h_size=256,
+              noise=0,
+              drop_p=0,
+              bnorm=False,
+              lnorm=False,
+              scaleshift=True,
+              legacy=False,
+              actv_fxn="ReLU"):
+    """
+    Defines a simple fully connected Sequential module
+
+    Args:
+        inpt_size: int
+            the dimension of the inputs
+        outp_size: int
+            the dimension of the final output
+        n_layers: int
+            the number of layers for the fc net
+        h_size: int
+            the dimensionality of the hidden layers
+        noise: float
+            the std of added noise before the relue at each layer.
+        drop_p: float
+            the probability of dropping a node
+        bnorm: bool
+            if true, batchnorm is included before each relu layer
+        lnorm: bool
+            if true, layer norm is included before each relu layer
+        scaleshift: bool
+            if true, a ScaleShift layer is added after the activation
+            function
+    """
+    outsize = h_size if n_layers > 1 else outp_size
+    block = [  ]
+    block.append( nn.Linear(inpt_size, outsize) )
+    prev_size = outsize
+    for i in range(1, n_layers):
+        block.append( GaussianNoise(noise) )
+        block.append( nn.Dropout(drop_p) )
+        block.append( globals()[actv_fxn]() )
+        if bnorm: block.append( nn.BatchNorm1d(outsize) )
+        if lnorm: block.append( nn.LayerNorm(outsize) )
+        if scaleshift: block.append( ScaleShift((outsize,)) )
+        if i+1 == n_layers: outsize = outp_size
+        block.append( nn.Linear(prev_size, outsize) )
+    return nn.Sequential(*block)
+
+class CoreModule(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    @property
+    def is_cuda(self):
+        try:
+            return next(self.parameters()).is_cuda
+        except:
+            return False
+
+    def get_device(self):
+        return DEVICES[next(self.parameters()).get_device()]
+
+    def sample_with_temperature(self, logits, temperature):
+        """
+        Args:
+            logits: torch float tensor (..., L)
+            temperature: float or None
+                a value to increase the sampling entropy. ignored if
+                0 or None
+        """
+        if not temperature: return torch.argmax(logits, dim=-1)
+        ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
+        return torch.multinomial(ps, num_samples=1)[...,0]
+
+
 class Flatten(nn.Module):
     """
     Reshapes the activations to be of shape (B,-1) where B

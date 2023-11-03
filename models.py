@@ -32,6 +32,7 @@ class SequenceModule(tmods.CoreModule):
                 d_model:int=128,
                 n_heads:int=4,
                 h_mult:int=4,
+                h_norm:bool=False,
                 n_layers:int=3,
                 norm_first:bool=True,
                 drop_p:float=0.5,
@@ -59,6 +60,8 @@ class SequenceModule(tmods.CoreModule):
         h_mult: int
             a multiplier to determine the hidden dimensionality of the
             feed forward networks in the model.
+        h_norm: bool
+            if true, will use a layer norm on the lstm hidden state
         n_layers: int
             the number of transformer layers
         norm_first: bool
@@ -101,6 +104,7 @@ class SequenceModule(tmods.CoreModule):
         self.d_model = d_model
         self.n_heads = n_heads
         self.h_mult = h_mult
+        self.h_norm = h_norm
         self.n_layers = n_layers
         self.drop_p = drop_p
         self.norm_first = norm_first
@@ -323,7 +327,6 @@ class LSTM(SequenceModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = 'LSTM'
-        self.h_norm = self.lnorm
 
         if self.n_tokens:
             self.embeddings = torch.nn.Embedding(
@@ -368,10 +371,10 @@ class LSTM(SequenceModule):
         return [h.to(d) for h in hs], [c.to(d) for c in cs]
     
     def step(self,
-             src,
-             pad_mask,
-             hs,
-             cs,
+             src=None,
+             pad_mask=None,
+             hs=None,
+             cs=None,
              temperature=None,
              prev_logits=None,
              inputs_embeds=None,
@@ -379,6 +382,7 @@ class LSTM(SequenceModule):
         """
         Arguments:
             src: Tensor, shape ``[bsize]``
+                if None, inputs_embeds must be not None
             pad_mask: BoolTensor, shape ``[bsize]``
                 1s/Trues denote padding, 0s/Falses denote not padding
             hs: list of Tensors with shape (B, D)
@@ -403,15 +407,25 @@ class LSTM(SequenceModule):
                 cs: list of Tensors with shape (B, D)
                     a list of updated c vectors for each lstm
         """
-        B = src.shape[0]
-        idx = ~pad_mask.bool()
+        if src is None:
+            B = inputs_embeds.shape[0]
+            pred_ids = torch.zeros(B,device=self.get_device()).long()
+        else:
+            B = src.shape[0]
+            pred_ids = src.detach().data.clone()
+
+        if pad_mask is None:
+            idx = torch.zeros(B, device=self.get_device()).bool()
+        else:
+            idx = ~pad_mask.bool()
+
         if prev_logits is None:
             # will be used to store the predicted logits
             logits = torch.zeros(B,self.out_tokens).to(self.get_device())
         else:
             logits = prev_logits.detach().data.clone()
-        pred_ids = src.detach().data.clone()
-        if not inputs_embeds:
+
+        if inputs_embeds is None:
             inpt = self.embeddings(src)[idx]
         else: inpt = inputs_embeds[idx]
         
@@ -475,7 +489,7 @@ class LSTM(SequenceModule):
         
         # Loop through sequence
         for step in range(S+n_steps):
-            if step<pad_mask.shape[-1]:
+            if step<embs.shape[1]:
                 pmask = pad_mask[:,step]
                 inpt = embs[:,step]
             else:
@@ -1004,7 +1018,7 @@ class LossWrapper(torch.nn.Module):
 
         # TODO: figure out more modular way to do this
         inpts = data["input_ids"]
-        if not tforce:
+        if not tforce or type(self.model)==LSTM:
             leading_pad = torch.max(torch.argmax(
                 (~inpt_pad_mask).long(), dim=1
             ))

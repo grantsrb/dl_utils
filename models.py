@@ -1016,7 +1016,10 @@ class LossWrapper(torch.nn.Module):
             out_pad_mask = out_pad_mask==bos_id
         else: out_pad_mask = data["output_pad_mask"].clone()
 
-        # TODO: figure out more modular way to do this
+        # TODO: figure out more modular way to do this. We do this
+        # because for this task, we need some seed input for the
+        # model to begin predicting from. Also for LSTMs,
+        # the training seems to be more robust without teacher forcing.
         inpts = data["input_ids"]
         if not tforce or type(self.model)==LSTM:
             leading_pad = torch.max(torch.argmax(

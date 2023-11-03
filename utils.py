@@ -227,3 +227,17 @@ def arglast(mask, dim=None, axis=-1):
     else:
         argmaxs = torch.argmax(torch.flip(mask, dims=(dim,)), dim=dim)
     return mask.shape[dim] - argmaxs - 1
+
+def padmask2attnmask(pad_mask):
+    """
+    Converts a padding mask into an attention mask to be argued to
+    huggingface's attention_mask. Does so by doing an outer product
+    of the row vectors with themselves. This allows you to combine masks
+    with more flexibility.
+
+    Args:
+        pad_mask: Tensor (B,S)
+    Returns:
+        attn_mask: Tensor (B,S,S)
+    """
+    return torch.einsum("bs,bj->bsj", pad_mask, pad_mask)

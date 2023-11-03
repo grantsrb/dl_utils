@@ -276,10 +276,15 @@ class Tokenizer():
                 tid = len(word2id)
                 word2id[w] = tid
                 id2word[tid] = w
-        # set special token id members (i.e. self.pad_id)
+
+        # set special token id members (i.e. self.pad_id, self.bos_id,
+        # self.eos_id)
+        self.special_ids = dict()
         for k,v in self.special_tokens.items():
             splt = k.split("_")
-            setattr(self, f"{splt[0]}_id", word2id[v])
+            s = f"{splt[0]}_id"
+            setattr(self, s, word2id[v])
+            self.special_ids[s] = word2id[v]
 
         if strings is not None:
             for s in strings:

@@ -6,8 +6,8 @@ import torch
 import time
 import math
 from collections import deque
-import dl_utils.save_io as io
-import dl_utils.utils as utils
+import save_io as io
+import utils as utils
 import select
 import shutil
 import torch.multiprocessing as mp

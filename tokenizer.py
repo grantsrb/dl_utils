@@ -461,18 +461,18 @@ class Tokenizer():
                 )
         return strings
     
-    def decode(self, idxs):
+    def decode(self, ids):
         """
         Converts a list of indices to a list of stings
 
         Args:
-            idxs: int or list of ints or tensor
+            ids: int or list of ints or tensor
                 the indices to be converted to string values
         Returns:
             strings: list of str
                 a list of the joined string values of the argued indices
         """
-        return self.ids_to_strs(idxs)
+        return self.ids_to_strs(ids)
 
     def strs_to_ids(self,
                     strings,
@@ -498,7 +498,7 @@ class Tokenizer():
                 if true, adds the bos token to the beginning of every
                 string within strings
         Returns:
-            idxs: list of ints
+            ids: list of ints
                 a list of the integer indices of each token in the
                 argued strings
         """
@@ -535,7 +535,7 @@ class Tokenizer():
                 if true, adds the eos token to the end of every
                 string within strings
         Returns:
-            idxs: list of ints or LongTensor
+            ids: list of ints or LongTensor
                 a list of the integer indices of each token in the
                 argued strings
         """

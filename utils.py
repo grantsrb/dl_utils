@@ -165,12 +165,38 @@ def pad_list(arr, tot_len, fill_val=0, side="right"):
         arr = padding + arr
     return arr
 
+def pad_list_to(arr, tot_len, fill_val=0, side="right"):
+    """
+    Pads the argued array to the goal length. Operates in place.
+
+    Args:
+        arr: list
+        tot_len: int
+            the length to pad to
+        fill_val: int
+            the symbol to use for the padding
+        side: str
+            pad on the left side or the right
+    Returns:
+        arr: list
+            the padded list
+    """
+    n_pad = tot_len - len(arr)
+    if n_pad<=0: return arr
+    if side=="right":
+        for i in range(n_pad):
+            arr.append(fill_val)
+    else:
+        padding = [fill_val for _ in range(n_pad)]
+        arr = padding + arr
+    return arr
+
 def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
     """
     Pads the argued list to the goal length along a single dimension.
 
     Args:
-        arr: numpy or torch tensor
+        arr: list or ndarray or torch tensor
         tot_len: int
             the length of the resulting array
         fill_val: object
@@ -181,6 +207,13 @@ def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
         arr: list
             the padded list
     """
+    if type(arr)==list:
+        return pad_list_to(
+            arr,
+            tot_len=tot_len,
+            fill_val=fill_val,
+            side=side,
+        )
     if dim<0: dim = len(arr.shape) + dim
     n_pad = tot_len - arr.shape[dim]
     if n_pad<=0: return arr

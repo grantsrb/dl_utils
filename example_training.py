@@ -226,8 +226,8 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 preds = package["pred_ids"]
                 targs = data["output_ids"]
                 for i in range(min(3,len(preds))):
-                    print("Targ:", targs[i].cpu().data.tolist()[:-1])
-                    print("Pred:", preds[i].cpu().data.tolist()[1:])
+                    print("Targ:", targs[i].cpu().data.tolist())
+                    print("Pred:", preds[i].cpu().data.tolist())
                     print()
                 print()
                 print()

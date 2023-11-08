@@ -1,6 +1,15 @@
 import math
+import numpy as np
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
+
+from .utils import (
+    padmask2attnmask,
+    get_causal_cross_mask,
+    get_causal_mask,
+    get_full_cross_mask,
+)
 
 from transformers import LlamaModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -22,7 +31,6 @@ def get_fcnet(inpt_size,
               bnorm=False,
               lnorm=False,
               scaleshift=True,
-              legacy=False,
               actv_fxn="ReLU"):
     """
     Defines a simple fully connected Sequential module
@@ -418,8 +426,8 @@ class CrossAttention(nn.Module):
                 keys,
                 values,
                 key_padding_masks=None,
-                need_weights=True,
                 step_masks=None,
+                need_weights=True,
                 is_causal=True,
                 average_attn_weights=True,
                 tforce=True,
@@ -490,17 +498,23 @@ class CrossAttention(nn.Module):
                 will use only the last embedding of each modality as
                 the queries (saving computation).
         """
-        cross_mask = self.get_cross_mask(step_masks)
+        cross_mask = get_full_cross_mask(step_masks) # (B,S1+S2,S1+S2)
+        pad_mask = torch.cat(key_padding_masks, dim=-1)# (B,S1+S2)
+        pad_mask = padmask2attnmask(pad_mask) # (B,S1+S2,S1+S2)
+        attn_mask = ~(cross_mask|pad_mask)
+
         if not tforce:
             # only take the latest queries and the corresponding masks
             running_sum = 0
             idxs = []
+            # TODO: Need to transpose to index into correct axis
             for q in queries:
-                running_sum += len(q)
+                running_sum += q.shape[1]
                 idxs.append(running_sum-1)
-            idxs = torch.LongTensor(idxs)
+            idxs = torch.LongTensor(idxs,device=self.get_device())
             cross_mask = cross_mask[idxs]
             queries = [ q[:,-1:] for q in queries ]
+
         queries = [
           q + self.mode_encodings.weight[i] for i,q in enumerate(queries)
         ]
@@ -510,9 +524,6 @@ class CrossAttention(nn.Module):
         values = [
           v + self.mode_encodings.weight[i] for i,v in enumerate(values)
         ]
-        pad_mask = None
-        if key_padding_masks is not None:
-            pad_mask = torch.cat(key_padding_masks, dim=1)
         query = torch.cat(queries, dim=1)
         key =   torch.cat(keys, dim=1)
         value = torch.cat(values, dim=1)
@@ -526,12 +537,6 @@ class CrossAttention(nn.Module):
         if need_weights:
             return attn_out, attn_weights
         return attn_out
-
-
-    def get_cross_mask(self, step_masks):
-        """
-
-        """
 
 class FlexibleLlamaModel(LlamaModel):
     """
@@ -626,6 +631,7 @@ class FlexibleLlamaModel(LlamaModel):
         next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -634,25 +640,14 @@ class FlexibleLlamaModel(LlamaModel):
             else:
                 past_key_value = past_key_values[idx]
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    past_key_value,
-                    output_attentions,
-                    use_cache,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
 
             hidden_states = layer_outputs[0]
 
@@ -683,3 +678,339 @@ class FlexibleLlamaModel(LlamaModel):
             attentions=all_self_attns,
         )
 
+def print_tensor(t, n_tab=0):
+    if len(t.shape)==2:
+        el = t.tolist()
+        for e in el:
+            print("\t"*n_tab, e)
+    else:
+        for tt in t:
+            print_tensor(tt, n_tab=n_tab+1)
+            print()
+
+if __name__=="__main__":
+    for i in range(3):
+        mask1 = np.arange(3)
+        mask2 = np.repeat(mask1, (i+1,))
+        print("Mask1:", mask1)
+        print("Mask2:", mask2)
+        cross_mask = get_full_cross_mask(
+            [torch.LongTensor(mask1[None]), torch.LongTensor(mask2[None])]
+        )
+        print("Output:")
+        print_tensor(cross_mask.float())
+        print()
+        print()
+        mask1,mask2 = mask2,mask1
+        print("Mask1:", mask1)
+        print("Mask2:", mask2)
+        cross_mask = get_full_cross_mask(
+            [torch.LongTensor(mask1[None]), torch.LongTensor(mask2[None])]
+        )
+        print("Output:")
+        print_tensor(cross_mask.float())
+        print()
+        print()
+
+## Adapted directly from pytorch implementation
+#class TransformerEncoderLayer(torch.nn.Module):
+#    r"""TransformerEncoderLayer is made up of self-attn and feedforward network.
+#    This standard encoder layer is based on the paper "Attention Is All You Need".
+#    Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+#    Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. In Advances in
+#    Neural Information Processing Systems, pages 6000-6010. Users may modify or implement
+#    in a different way during application.
+#
+#    TransformerEncoderLayer can handle either traditional torch.tensor inputs,
+#    or Nested Tensor inputs.  Derived classes are expected to similarly accept
+#    both input formats.  (Not all combinations of inputs are currently
+#    supported by TransformerEncoderLayer while Nested Tensor is in prototype
+#    state.)
+#
+#    If you are implementing a custom layer, you may derive it either from
+#    the Module or TransformerEncoderLayer class.  If your custom layer
+#    supports both torch.Tensors and Nested Tensors inputs, make its
+#    implementation a derived class of TransformerEncoderLayer. If your custom
+#    Layer supports only torch.Tensor inputs, derive its implementation from
+#    Module.
+#
+#    Args:
+#        d_model: the number of expected features in the input (required).
+#        nhead: the number of heads in the multiheadattention models (required).
+#        dim_feedforward: the dimension of the feedforward network model (default=2048).
+#        dropout: the dropout value (default=0.1).
+#        activation: the activation function of the intermediate layer, can be a string
+#            ("relu" or "gelu") or a unary callable. Default: relu
+#        layer_norm_eps: the eps value in layer normalization components (default=1e-5).
+#        batch_first: If ``True``, then the input and output tensors are provided
+#            as (batch, seq, feature). Default: ``False`` (seq, batch, feature).
+#        norm_first: if ``True``, layer norm is done prior to attention and feedforward
+#            operations, respectively. Otherwise it's done after. Default: ``False`` (after).
+#        bias: If set to ``False``, ``Linear`` and ``LayerNorm`` layers will not learn an additive
+#            bias. Default: ``True``.
+#
+#    Examples::
+#        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8)
+#        >>> src = torch.rand(10, 32, 512)
+#        >>> out = encoder_layer(src)
+#
+#    Alternatively, when ``batch_first`` is ``True``:
+#        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True)
+#        >>> src = torch.rand(32, 10, 512)
+#        >>> out = encoder_layer(src)
+#
+#    Fast path:
+#        forward() will use a special optimized implementation described in
+#        `FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness`_ if all of the following
+#        conditions are met:
+#
+#        - Either autograd is disabled (using ``torch.inference_mode`` or ``torch.no_grad``) or no tensor
+#          argument ``requires_grad``
+#        - training is disabled (using ``.eval()``)
+#        - batch_first is ``True`` and the input is batched (i.e., ``src.dim() == 3``)
+#        - activation is one of: ``"relu"``, ``"gelu"``, ``torch.functional.relu``, or ``torch.functional.gelu``
+#        - at most one of ``src_mask`` and ``src_key_padding_mask`` is passed
+#        - if src is a `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_, neither ``src_mask``
+#          nor ``src_key_padding_mask`` is passed
+#        - the two ``LayerNorm`` instances have a consistent ``eps`` value (this will naturally be the case
+#          unless the caller has manually modified one without modifying the other)
+#
+#        If the optimized implementation is in use, a
+#        `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_ can be
+#        passed for ``src`` to represent padding more efficiently than using a padding
+#        mask. In this case, a `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_ will be
+#        returned, and an additional speedup proportional to the fraction of the input that
+#        is padding can be expected.
+#
+#        .. _`FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness`:
+#         https://arxiv.org/abs/2205.14135
+#
+#    """
+#    __constants__ = ['norm_first']
+#
+#    def __init__(self,
+#                 d_model: int,
+#                 nhead: int,
+#                 dim_feedforward: int = 2048,
+#                 dropout: float = 0.1,
+#                 activation=F.gelu,
+#                 layer_norm_eps: float = 1e-5,
+#                 batch_first: bool = False,
+#                 norm_first: bool = False,
+#                 bias: bool = True,
+#                 add_zero_attn=False,
+#                 device=None, dtype=None) -> None:
+#        factory_kwargs = {'device': device, 'dtype': dtype}
+#        super().__init__()
+#        self.add_zero_attn = add_zero_attn
+#        self.self_attn = nn.MultiheadAttention(
+#            d_model, nhead, dropout=dropout,
+#            bias=bias, batch_first=batch_first,
+#            add_zero_attn=self.add_zero_attn,
+#            **factory_kwargs
+#        )
+#        # Implementation of Feedforward model
+#        self.linear1 = nn.Linear(
+#            d_model, dim_feedforward, bias=bias, **factory_kwargs
+#        )
+#        self.dropout = nn.Dropout(dropout)
+#        self.linear2 = nn.Linear(
+#            dim_feedforward, d_model, bias=bias, **factory_kwargs
+#        )
+#
+#        self.norm_first = norm_first
+#        self.norm1 =    nn.LayerNorm(
+#            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs
+#        )
+#        self.norm2 =    nn.LayerNorm(
+#            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs
+#        )
+#        self.dropout1 = nn.Dropout(dropout)
+#        self.dropout2 = nn.Dropout(dropout)
+#
+#        # We can't test self.activation in forward() in TorchScript,
+#        # so stash some information about it instead.
+#        if activation is F.relu or isinstance(activation, torch.nn.ReLU):
+#            self.activation_relu_or_gelu = 1
+#        elif activation is F.gelu or isinstance(activation, torch.nn.GELU):
+#            self.activation_relu_or_gelu = 2
+#        else:
+#            self.activation_relu_or_gelu = 0
+#        self.activation = activation
+#
+#    def __setstate__(self, state):
+#        super().__setstate__(state)
+#        if not hasattr(self, 'activation'):
+#            self.activation = F.relu
+#
+#
+#    def forward(self,
+#                src,
+#                src_mask= None,
+#                src_key_padding_mask= None,
+#                is_causal: bool = False,
+#                use_cache=False,
+#                past_key_values=None,
+#                ):
+#        r"""
+#        Pass the input through the encoder layer.
+#
+#        Args:
+#            src: torch Tensor (B,S)
+#                the sequence to the encoder layer (required).
+#            src_mask: BoolTensor (B,S) or (B,S,S)
+#                the mask for the src sequence (optional).
+#            src_key_padding_mask:
+#                the mask for the src keys per batch (optional).
+#            is_causal: If specified, applies a causal mask as
+#                ``src mask``.  Default: ``False``.
+#                Warning:
+#                ``is_causal`` provides a hint that ``src_mask`` is the
+#                causal mask. Providing incorrect hints can result in
+#                incorrect execution, including forward and backward
+#                compatibility.
+#
+#        Shape:
+#            see the docs in Transformer class.
+#        """
+#        src_key_padding_mask = F._canonical_mask(
+#            mask=src_key_padding_mask,
+#            mask_name="src_key_padding_mask",
+#            other_type=F._none_or_dtype(src_mask),
+#            other_name="src_mask",
+#            target_type=src.dtype
+#        )
+#
+#        src_mask = F._canonical_mask(
+#            mask=src_mask,
+#            mask_name="src_mask",
+#            other_type=None,
+#            other_name="",
+#            target_type=src.dtype,
+#            check_other=False,
+#        )
+#
+#        # see Fig. 1 of https://arxiv.org/pdf/2002.04745v1.pdf
+#        why_not_sparsity_fast_path = ''
+#        if not src.dim() == 3:
+#            why_not_sparsity_fast_path = f"input not batched; expected src.dim() of 3 but got {src.dim()}"
+#        elif self.training:
+#            why_not_sparsity_fast_path = "training is enabled"
+#        elif not self.self_attn.batch_first :
+#            why_not_sparsity_fast_path = "self_attn.batch_first was not True"
+#        elif not self.self_attn._qkv_same_embed_dim :
+#            why_not_sparsity_fast_path = "self_attn._qkv_same_embed_dim was not True"
+#        elif not self.activation_relu_or_gelu:
+#            why_not_sparsity_fast_path = "activation_relu_or_gelu was not True"
+#        elif not (self.norm1.eps == self.norm2.eps):
+#            why_not_sparsity_fast_path = "norm1.eps is not equal to norm2.eps"
+#        elif src.is_nested and (src_key_padding_mask is not None or src_mask is not None):
+#            why_not_sparsity_fast_path = "neither src_key_padding_mask nor src_mask are not supported with NestedTensor input"
+#        elif self.self_attn.num_heads % 2 == 1:
+#            why_not_sparsity_fast_path = "num_head is odd"
+#        elif torch.is_autocast_enabled():
+#            why_not_sparsity_fast_path = "autocast is enabled"
+#        if not why_not_sparsity_fast_path:
+#            tensor_args = (
+#                src,
+#                self.self_attn.in_proj_weight,
+#                self.self_attn.in_proj_bias,
+#                self.self_attn.out_proj.weight,
+#                self.self_attn.out_proj.bias,
+#                self.norm1.weight,
+#                self.norm1.bias,
+#                self.norm2.weight,
+#                self.norm2.bias,
+#                self.linear1.weight,
+#                self.linear1.bias,
+#                self.linear2.weight,
+#                self.linear2.bias,
+#            )
+#
+#            # We have to use list comprehensions below because TorchScript
+#            # does not support generator expressions.
+#            _supported_device_type = [
+#                "cpu", "cuda",
+#                torch.utils.backend_registration._privateuse1_backend_name
+#            ]
+#            if torch.overrides.has_torch_function(tensor_args):
+#                s = "some Tensor argument has_torch_function"
+#                why_not_sparsity_fast_path = s
+#            elif not all((x.device.type in _supported_device_type) for
+#                                                        x in tensor_args):
+#                why_not_sparsity_fast_path = (
+#                    "some Tensor argument's device is neither one of "
+#                    f"{_supported_device_type}"
+#                )
+#            elif torch.is_grad_enabled() and any(x.requires_grad for
+#                                                    x in tensor_args):
+#                why_not_sparsity_fast_path = (
+#                  "grad is enabled and at least one of query or the "
+#                  "input/output projection weights or biases requires_grad"
+#                )
+#
+#            if not why_not_sparsity_fast_path:
+#                merged_mask, mask_type = self.self_attn.merge_masks(
+#                    src_mask, src_key_padding_mask, src
+#                )
+#                return torch._transformer_encoder_layer_fwd(
+#                    src,
+#                    self.self_attn.embed_dim,
+#                    self.self_attn.num_heads,
+#                    self.self_attn.in_proj_weight,
+#                    self.self_attn.in_proj_bias,
+#                    self.self_attn.out_proj.weight,
+#                    self.self_attn.out_proj.bias,
+#                    self.activation_relu_or_gelu == 2,
+#                    self.norm_first,
+#                    self.norm1.eps,
+#                    self.norm1.weight,
+#                    self.norm1.bias,
+#                    self.norm2.weight,
+#                    self.norm2.bias,
+#                    self.linear1.weight,
+#                    self.linear1.bias,
+#                    self.linear2.weight,
+#                    self.linear2.bias,
+#                    merged_mask,
+#                    mask_type,
+#                )
+#
+#
+#        x = src
+#        if self.norm_first:
+#            x = x + self._sa_block(
+#                self.norm1(x),
+#                src_mask,
+#                src_key_padding_mask,
+#                is_causal=is_causal
+#            )
+#            x = x + self._ff_block(self.norm2(x))
+#        else:
+#            x = self.norm1(x + self._sa_block(
+#                x, src_mask, src_key_padding_mask, is_causal=is_causal
+#            ))
+#            x = self.norm2(x + self._ff_block(x))
+#
+#        return x
+#
+#    # self-attention block
+#    def _sa_block(self,
+#                  q,
+#                  k,
+#                  v,
+#                  attn_mask,
+#                  key_padding_mask,
+#                  is_causal: bool = False):
+#        x = self.self_attn(q,k,v,
+#                           attn_mask=attn_mask,
+#                           key_padding_mask=key_padding_mask,
+#                           need_weights=False, is_causal=is_causal)[0]
+#        return self.dropout1(x)
+#
+#    # feed forward block
+#    def _ff_block(self, x):
+#        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+#        return self.dropout2(x)   
+#   
+#   

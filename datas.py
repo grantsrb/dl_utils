@@ -112,5 +112,5 @@ def get_datasets(config):
     train_samps = samples[:n_train]
     val_samps = samples[n_train:]
     train_dataset = CausalDataset(train_samps, **special_ids)
-    val_dataset =   CausalDataset(train_samps, **special_ids)
+    val_dataset =   CausalDataset(val_samps, **special_ids)
     return tkzr, train_dataset, val_dataset

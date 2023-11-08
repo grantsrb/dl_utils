@@ -8,7 +8,7 @@ import accelerate
 
 from save_io import save_checkpt, load_json_or_yaml
 from datas import get_datasets
-from models import make_model
+from seq_models import make_model
 from schedulers import DecayScheduler
 
 """

@@ -20,6 +20,11 @@ from transformers import (
     LlamaConfig,
     TransfoXLConfig,
 )
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_attn_mask_utils import (
+    _prepare_4d_causal_attention_mask
+)
 
 DEVICES = {
     -1: "cpu", **{i:i for i in range(10)}
@@ -125,6 +130,50 @@ class SequenceModule(tmods.CoreModule):
         print("Weight initialization currently not implemented")
         pass
 
+    def get_config(self):
+        """
+        Finds the appropirate configuration when using Huggingface
+        models.
+        """
+        n_tokens = self.n_tokens if self.n_tokens else self.out_tokens
+        d_hid = self.h_mult*self.d_model
+        config_kwargs = {
+            "vocab_size": n_tokens,
+            "hidden_size": self.d_model,
+            "intermediate_size": d_hid,
+            "num_hidden_layers": self.n_layers,
+            "num_attention_heads": self.n_heads,
+            "num_key_value_heads": self.n_heads,
+            "hidden_act": self.actv_fxn,
+            "n_positions": self.max_posencs,
+            "rotary_dim": self.d_model//self.n_heads,
+            "rope_theta": self.d_model//self.n_heads,
+            "n_ctx": self.max_posencs,
+            "n_embd": self.d_model,
+            "n_head": self.n_heads,
+            "n_inner": d_hid,
+            "activation_function": self.actv_fxn,
+            "resid_pdrop": self.drop_p,
+            "embd_pdrop":  0,
+            "attn_pdrop":  self.drop_p,
+            "scale_attn_weights": self.scale_attn_weights,
+            "scale_attn_by_inverse_layer_idx": self.scale_by_inv_layer,
+            "tie_word_embeddings": False,
+            "torch_dtype": "float32",
+            "reorder_and_upcast_attn": self.reorder_and_upcast,
+            "add_cross_attention": False,
+        }
+        if self.hf_model_type=="gpt2":
+            config = GPT2Config()
+        elif self.hf_model_type == "gptj":
+            config = GPTJConfig()
+        elif self.hf_model_type == "llama":
+            config = LlamaConfig()
+        elif self.hf_model_type == "transxl":
+            config = TransfoXLConfig()
+        config.update(config_kwargs)
+        return config
+
     def forward(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
@@ -177,151 +226,6 @@ class SequenceModule(tmods.CoreModule):
                 temperature=temperature,
             )
         return ret_dict
-
-class VisionModule(tmods.CoreModule):
-    """
-    This is the base class for vision modules.
-    """
-    def __init__(self,
-                 inpt_shape,
-                 outp_size,
-                 bnorm=False,
-                 lnorm=False,
-                 drop_p=0,
-                 actv_fxn="ReLU",
-                 depths=[32, 48],
-                 kernels=[3, 3],
-                 strides=[4, 1],
-                 paddings=[0, 0],
-                 groups=1,
-                 *args, **kwargs):
-        """
-        Args: 
-            inpt_shape: tuple or listlike (..., C, H, W)
-                the shape of the input
-            outp_size: int
-                the size of the final output vector
-            bnorm: bool
-                if true, the model uses batch normalization
-            lnorm: bool
-                if true, the model uses layer normalization on the h
-                and c recurrent vectors after the recurrent cell
-            drop_p: float
-                the probability of zeroing a neuron within the dense
-                layers of the network.
-            actv_fxn: str
-                the name of the activation function for each layer
-            depths: tuple of ints
-                the depth of each layer of the conv net
-            kernels: tuple of ints
-                the kernel size of each layer of the conv net
-            strides: tuple of ints
-                the stride of each layer of the conv net
-            paddings: tuple of ints
-                the padding of each layer of the conv net
-            groups: int or tuple of ints
-                the number of convolutional groups at each layer of the
-                fully connected
-                ouput networks
-        """
-        super().__init__()
-        self.inpt_shape = inpt_shape
-        self.outp_size = outp_size
-        self.bnorm = bnorm
-        self.lnorm = lnorm
-        self.drop_p = drop_p
-        self.actv_fxn = actv_fxn
-        self.depths = [self.inpt_shape[-3], *depths]
-        self.kernels = kernels
-        if isinstance(kernels, int):
-            self.kernels = [kernels for i in range(len(depths))]
-        self.strides = strides
-        if isinstance(strides, int):
-            self.strides = [strides for i in range(len(depths))]
-        self.paddings = paddings
-        if isinstance(paddings, int):
-            self.paddings = [paddings for i in range(len(depths))]
-        self.groups = groups
-        if isinstance(groups, int):
-            self.groups = [groups for i in range(len(depths))]
-        
-
-class RawVision(VisionModule):
-    """
-    This vision module feeds the visual input directly, without
-    preprocessing.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.shapes = [ *self.inpt_shape[-3:] ]
-        self.flat_size = int(np.prod(self.inpt_shape[-3:]))
-        self.features = tmods.NullOp()
-
-    def step(self, x, *args, **kwargs):
-        return x
-
-    def forward(self, x, *args, **kwargs):
-        return x.reshape(len(x), -1)
-
-class CNN(VisionModule):
-    """
-    A simple convolutional network
-        conv2d
-        bnorm/lnorm
-        relu
-        dropout
-        repeat xN
-        linear
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        modules = []
-        shape = [*self.inpt_shape[-3:]]
-        self.shapes = [shape]
-        groups = 1
-        for i in range(len(self.depths)-1):
-            # CONV
-            modules.append(
-                nn.Conv2d(
-                    self.depths[i],
-                    self.depths[i+1],
-                    kernel_size=self.kernels[i],
-                    stride=self.strides[i],
-                    padding=self.paddings[i],
-                    groups=max(int(groups*(i>0)), 1)
-                )
-            )
-            # RELU
-            modules.append(globals()[self.actv_fxn]())
-            # Batch Norm
-            if self.bnorm:
-                modules.append(nn.BatchNorm2d(self.depths[i+1]))
-            # Track Activation Shape Change
-            shape = update_shape(
-                shape, 
-                depth=self.depths[i+1],
-                kernel=self.kernels[i],
-                stride=self.strides[i],
-                padding=self.paddings[i]
-            )
-            self.shapes.append(shape)
-        self.features = nn.Sequential(*modules)
-
-        self.flat_size = int(np.prod(shape))
-        self.projection = nn.Linear(self.flat_size, self.outp_size)
-
-    def forward(self, x, *args, **kwargs):
-        """
-        Performs a single step rather than a complete sequence of steps
-
-        Args:
-            x: torch FloatTensor (B, C, H, W)
-        Returns:
-            pred: torch Float Tensor (B, K)
-        """
-        fx = self.features(x)
-        fx = fx.reshape(len(fx), -1)
-        return self.projection(fx)
 
 class LSTM(SequenceModule):
     def __init__(self, *args, **kwargs):
@@ -486,7 +390,7 @@ class LSTM(SequenceModule):
         logits = []
         pred_ids = []
         hs,cs = self.get_fresh_recurrent_vectors(B)
-        
+
         # Loop through sequence
         for step in range(S+n_steps):
             if step<embs.shape[1]:
@@ -509,6 +413,326 @@ class LSTM(SequenceModule):
             "pred_ids": torch.stack(pred_ids,dim=1),
             "hs": hs, "cs": cs
         }
+
+
+class Transformer(SequenceModule):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        config = self.get_config()
+        self.layers = torch.nn.ModuleList([])
+        for _ in range(self.n_layers):
+            self.layers.append(LlamaDecoderLayer( config ))
+        self.decoder = nn.Sequential(
+            nn.LayerNorm(self.d_model),
+            nn.Linear(self.d_model, self.n_tokens)
+        )
+        self.init_weights()
+
+    def get_prep_tensors(self,
+                inputs_embeds=None,
+                attention_mask=None,
+                past_key_values=None,
+                position_ids=None,
+                *args, **kwargs):
+        """
+        This function preps a number of tensors that are used for
+        processing the inputs.
+
+        Arguments:
+            inputs_embeds: None or torch FloatTensor (B,S,E)
+                the input embeddings. this must not be None if input_ids
+                is None. input_ids overrides this argument if both are
+                not None.
+            attention_mask: Tensor, shape (B,S,S) or (B,S)
+                true values mean non-masked and attended to indices.
+                NOTE: This is flipped from the other functions!!!!
+            past_key_values: list of lists of tensors
+                the cached computations returned by the layer when
+                `use_cache` is true.
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
+        Returns:
+            position_ids: LongTensor (1,S)
+                logits:
+            attention_mask: BoolTensor (B,1,S,S)
+        """
+        B,S,E = inputs_embeds.shape
+
+        past_kv_len = 0
+        if past_key_values is not None:
+            past_kv_len = past_key_values[0][0].shape[2]
+
+        if position_ids is None:
+            device = inputs_embeds.device
+            # Want only position ids of the inputs_embeds. not the past
+            # key values
+            position_ids = torch.arange(
+                past_kv_len,
+                S + past_kv_len,
+                dtype=torch.long,
+                device=device,
+            )
+            position_ids = position_ids.unsqueeze(0)
+
+        if len(attention_mask.shape)==2:
+            # 4d mask is passed through the layers
+            attention_mask = _prepare_4d_causal_attention_mask(
+                attention_mask, (B, S), inputs_embeds, past_kv_len
+            )
+        elif len(attention_mask.shape)==3:
+            attention_mask = attention_mask[:,None]
+        return position_ids, attention_mask
+
+    def encoder(self,
+                input_ids=None,
+                attention_mask=None,
+                use_cache=False,
+                past_key_values=None,
+                inputs_embeds=None,
+                position_ids=None,
+                output_attentions=False,
+                *args, **kwargs):
+        """
+        Arguments:
+            input_ids: Long Tensor, shape ``[bsize, seq_len]``
+                the input ids. one of this or inputs_embeds must be not
+                None
+            attention_mask: Tensor, shape (B,S,S) or (B,S)
+                true values mean non-masked and attended to indices.
+                NOTE: This is flipped from the other functions!!!!
+            use_cache: bool
+                if true, will return the updated past_key_values for
+                future speedups
+            past_key_values: list of lists of tensors
+                the cached computations returned by the layer when
+                `use_cache` is true.
+            inputs_embeds: None or torch FloatTensor (B,S,E)
+                the input embeddings. this must not be None if input_ids
+                is None. input_ids overrides this argument if both are
+                not None.
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
+            output_attentions: bool
+                if true, will return the attention weights
+        Returns:
+            ret_dict: dict
+                logits:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+        """
+        if inputs_embeds is None:
+            inputs_embeds = self.embeddings(input_ids)
+        hidden_states = inputs_embeds
+
+        position_ids, attn_mask = self.get_prep_tensors(
+            inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+
+        all_hidden_states = []
+        attn_weights = []
+        next_cache = []
+        for i,layer in enumerate(self.layers):
+            if past_key_values is not None:
+                past_key_value = past_key_values[i]
+            else:
+                past_key_value = None
+            output = layer(
+                hidden_states=hidden_states,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+            # Parse Output
+            hidden_states = output[0]
+            all_hidden_states.append(hidden_states)
+            if output_attentions:
+                attn_weights.append(output[1])
+                if use_cache:
+                    next_cache.append(output[2])
+            elif use_cache:
+                next_cache.append(output[1])
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=attn_weights,
+        )
+
+    def tforce_fwd(self,
+                   src:torch.Tensor,
+                   mask:torch.Tensor=None,
+                   pad_mask:torch.Tensor=None,
+                   inputs_embeds:torch.Tensor=None,
+                   *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                true means unattended locations
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            inputs_embeds: tensor (B,S,E)
+                optionally argue embeddings instead of token ids
+        Returns:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+        """
+        # flipped so that true means attend to
+        attn_mask = ~(pad_mask.bool())
+        if mask is not None:
+            attn_mask = padmask2attnmask(attn_mask)
+            attn_mask = attn_mask&~mask
+        output = self.encoder(
+            src,
+            attention_mask=attn_mask,
+            inputs_embeds=inputs_embeds,
+        )
+        if not hasattr(output, "logits"):
+            og_shape = output.last_hidden_state.shape
+            inpts = output.last_hidden_state.reshape(-1,og_shape[-1])
+            logits = self.decoder(inpts).reshape(*og_shape[:-1], -1)
+        else: logits = output.logits
+        return {
+            "logits":logits,
+            "pred_ids":torch.argmax(logits,dim=-1)
+        }
+
+    def freedom_fwd(self,
+                    src:torch.Tensor,
+                    mask:torch.Tensor=None,
+                    pad_mask:torch.Tensor=None,
+                    is_causal:bool=None,
+                    n_steps:int=10,
+                    incl_all_inpts:bool=False,
+                    pad_pos_skip:bool=False,
+                    temperature=None,
+                    inputs_embeds=None,
+                    past_key_values=None,
+                    *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                true means unattended locations
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". "predicted spaces" includes the shifted initial
+                inputs. This is useful to save a concatenation during
+                the data bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over masked tokens when applying
+                positional encodings based on the pad mask. True values
+                in the mask will be skipped.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            inputs_embeds: tensor (B,S,E)
+                optionally argue embeddings instead of token ids
+            past_key_values: tuple of tuple of tensors
+                the output of a huggingface cache. used to speed up
+                computations. See huggingface documentation for more
+                details
+        Returns:
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+        """
+        n_loops = n_steps + 1
+        if src is None:
+            B,S = inputs_embeds.shape[:2]
+        else:
+            B,S = src.shape
+
+        pad_mask = torch.nn.functional.pad(
+            ~(pad_mask.bool()), (0, n_loops), value=True
+        )
+        if mask is not None:
+            mask = torch.nn.functional.pad(
+                ~(mask.bool()), (0, n_loops, 0, n_loops), value=True
+            )
+        pred_ids = torch.zeros(
+            (B,S+n_loops), device=self.get_device()
+        ).long()
+        if src is not None:
+            pred_ids[:,:S] = src
+        logits = torch.zeros(
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
+            device=self.get_device()
+        )
+        logits[:,:S-1+incl_all_inpts].scatter_(
+            dim=-1,
+            index=src[:, 1-incl_all_inpts:S, None],
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+        )
+
+        # Need to ensure we use the appropriate input type between
+        # the src ids and the input embeddings
+        if src is None:
+            inpt_emb = inputs_embeds
+            inpt = None
+        else:
+            inpt = pred_ids[:,:S]
+            inpt_emb = None
+
+        # Need to ensure the padding mask is the full length of the
+        # past_key_values if past_key_values is not none
+        p_end = S
+        if past_key_values is not None:
+            p_end = past_key_values[0][0].shape[1]
+        attn_mask = pad_mask[:,:p_end]
+        if mask is not None:
+            attn_mask = padmask2attnmask(attn_mask)
+            attn_mask = mask[:,:p_end,:p_end]&attn_mask
+
+        for step in range(n_loops):
+            output = self.encoder(
+                input_ids=inpt,
+                attention_mask=attn_mask,
+                use_cache=True,
+                past_key_values=past_key_values,
+                inputs_embeds=inpt_emb,
+            )
+            past_key_values = output.past_key_values
+            ## TODO: change FlexibleLlama model to output logits
+            if not hasattr(output, "logits"):
+                inpts = output.last_hidden_state[:,-1]
+                pred = self.decoder(inpts)
+            else: pred = output.logits[:,-1]
+            logits[:,S-1+step+incl_all_inpts] = pred
+            argmaxs = self.sample_with_temperature(
+                pred, temperature
+            ).squeeze()
+            pred_ids[:,S+step] = argmaxs
+            if step < n_steps:
+                inpt_emb = None
+                inpt = pred_ids[:,S+step:S+step+1]
+                attn_mask = pad_mask[:,:p_end+step+1]
+                if mask is not None:
+                    attn_mask = padmask2attnmask(attn_mask)
+                    e = p_end+step+1
+                    attn_mask = mask[:,:e,:e]&attn_mask
+        return {
+            "logits": logits,
+            "preds":  pred_ids[:,int(not incl_all_inpts):],
+            "past_key_values": past_key_values,
+        }
+
+
 
 
 class HFTransformer(SequenceModule):
@@ -557,50 +781,6 @@ class HFTransformer(SequenceModule):
         else:
             self.decoder =  nn.Linear( self.d_model, self.out_tokens )
         self.init_weights()
-
-    def get_config(self):
-        """
-        Finds the appropirate configuration when using Huggingface
-        models.
-        """
-        n_tokens = self.n_tokens if self.n_tokens else self.out_tokens
-        d_hid = self.h_mult*self.d_model
-        config_kwargs = {
-            "vocab_size": n_tokens,
-            "hidden_size": self.d_model,
-            "intermediate_size": d_hid,
-            "num_hidden_layers": self.n_layers,
-            "num_attention_heads": self.n_heads,
-            "num_key_value_heads": self.n_heads,
-            "hidden_act": self.actv_fxn,
-            "n_positions": self.max_posencs,
-            "rotary_dim": self.d_model//self.n_heads,
-            "rope_theta": self.d_model//self.n_heads,
-            "n_ctx": self.max_posencs,
-            "n_embd": self.d_model,
-            "n_head": self.n_heads,
-            "n_inner": d_hid,
-            "activation_function": self.actv_fxn,
-            "resid_pdrop": self.drop_p,
-            "embd_pdrop":  0,
-            "attn_pdrop":  self.drop_p,
-            "scale_attn_weights": self.scale_attn_weights,
-            "scale_attn_by_inverse_layer_idx": self.scale_by_inv_layer,
-            "tie_word_embeddings": False,
-            "torch_dtype": "float32",
-            "reorder_and_upcast_attn": self.reorder_and_upcast,
-            "add_cross_attention": False,
-        }
-        if self.hf_model_type=="gpt2":
-            config = GPT2Config()
-        elif self.hf_model_type == "gptj":
-            config = GPTJConfig()
-        elif self.hf_model_type == "llama":
-            config = LlamaConfig()
-        elif self.hf_model_type == "transxl":
-            config = TransfoXLConfig()
-        config.update(config_kwargs)
-        return config
 
     def tforce_fwd(self,
                    src:torch.Tensor,
@@ -1131,11 +1311,12 @@ class LossWrapper(torch.nn.Module):
                 data["output_ids"][idx][i][~out_pad_mask[idx][i]]))
 
 class EmptyTokenizer:
-    def __init__(self): pass
+    def __init__(self):
+        pass
     def decode(self, x):
         return x
 
 def make_model(config):
-    model = globals()[config.get("model_type","HFTransformer")](**config)
+    model = globals()[config.get("model_type","Transformer")](**config)
     return LossWrapper(model=model, config=config, **config)
 

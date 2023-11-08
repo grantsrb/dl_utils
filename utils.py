@@ -232,8 +232,8 @@ def padmask2attnmask(pad_mask):
     """
     Converts a padding mask into an attention mask to be argued to
     huggingface's attention_mask. Does so by doing an outer product
-    of the row vectors with themselves. This allows you to combine masks
-    with more flexibility.
+    of the row vectors with themselves. The result allows you to
+    combine masks with more flexibility.
 
     Args:
         pad_mask: Tensor (B,S)
@@ -241,3 +241,88 @@ def padmask2attnmask(pad_mask):
         attn_mask: Tensor (B,S,S)
     """
     return torch.einsum("bs,bj->bsj", pad_mask, pad_mask)
+
+def get_causal_mask(sz: int):
+    """
+    Generates an upper-triangular matrix of True, with Falses on
+    diag and lower triangle.
+
+    Returns:
+        BoolTensor (sz,sz)
+            True values are masked out (non-attended) values
+    """
+
+    return generate_square_subsequent_mask(sz)
+
+def get_causal_cross_mask(step_masks):
+    """
+    This function uses the high level step indices to build a mask
+    to prevent the different modalities from looking ahead in time
+    while allowing different numbers of single modal sub steps for
+    a given global multi modal time step. To make a cross mask for
+    more than 2 modalities, use this function for every possible
+    combination and stitch the masks together.
+
+    Args:
+        step_masks: list of long tensors [(B,S1), (B,S2)]
+            a list of length 2 of tensors that denote the global,
+            multi-modal time step of the individual mode.
+    Returns:
+        cross_mask: bool tensor (B,S1,S2)
+            a cross mask to align modalities temporally. The length
+            of the list is determined by the number of elements
+            in `seq_lens`
+    """
+    for smask in step_masks:
+        smask[smask<0] = torch.max(smask)+1
+    shape = [*step_masks[0].shape, step_masks[1].shape[-1]]
+    cross_mask = torch.zeros(shape)
+    cross_mask = cross_mask + step_masks[0][..., None]
+    cross_mask = cross_mask - step_masks[1][:,None]
+    cross_mask[cross_mask<=0] = -1
+    cross_mask[cross_mask>0] = 0
+    cross_mask[cross_mask<0] = 1
+    return cross_mask.bool()
+
+def get_full_cross_mask(step_masks):
+    """
+    Constructs a causal cross mask by stitching different types of
+    masks together. The full mask consists of a standard causal mask
+    for attending to positions intra-modality (within modality) and a
+    causal cross mask for attending inter-modality (outside of modality).
+
+    Mask: [mode1 causal mask,   cross causal mask1 ]
+          [cross causal mask2, mode2 causal mask ]
+
+    Args:
+        step_masks: list of long tensors [(B,S1), (B,S2)]
+            a list of length 2 of tensors that denote the global,
+            multi-modal time step of the individual mode.
+    Returns:
+        cross_mask: bool tensor (B,S1+S2,S1+S2)
+            a causal cross attention mask. true values mean non-attended
+            locations. Does not allow modality x to attend to current
+            timestep of modality y and visa-versa.
+    """
+    # TODO: Allow longer sequence to attend to shorter sequence at
+    #   current global timestep and allow shorter sequence to attend
+    #   to first substep of longer sequence at current timestep
+    cross_mask1 = get_causal_cross_mask(step_masks)
+    mode1_mask = get_causal_mask(step_masks[0].shape[-1])
+    mode2_mask = get_causal_mask(step_masks[1].shape[-1])
+    print("Cross:", cross_mask1.shape)
+    print("mode1:", mode1_mask.shape)
+    print("mode2:", mode2_mask.shape)
+    cross_mask2 = torch.flip(torch.rot90(
+        cross_mask1,k=1,dims=(1,2)
+    ),dims=(-1,))
+    cross_mask = torch.cat([
+        torch.cat([
+            mode1_mask[None].repeat((len(cross_mask1),1,1)),
+            cross_mask1
+        ],dim=-1),
+        torch.cat([ 
+            cross_mask2, mode2_mask[None].repeat((len(cross_mask1),1,1))
+        ],dim=-1)
+    ],dim=1)
+    return cross_mask

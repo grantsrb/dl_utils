@@ -13,17 +13,18 @@ import shutil
 import torch.multiprocessing as mp
 from datetime import datetime
 
-def get_resume_checkpt(hyps, in_place=False, verbose=True):
+def get_resume_checkpt(config, in_place=False, verbose=True):
     """
     This function cleans up the code to resume from a particular
     checkpoint or folder.
 
     Args:
-        hyps: dict
+        config: dict
             dictionary of hyperparameters
             keys: str
                 "resume_folder": str
-                    must be a key present in hyps for this function to act.
+                    must be a key present in config for this function to
+                    act.
                 "ignore_keys": list of str
                     an optional key used to enumerate keys to be ignored
                     when loading the old hyperparameter set
@@ -35,10 +36,10 @@ def get_resume_checkpt(hyps, in_place=False, verbose=True):
         checkpt: dict or None
             a loaded checkpoint dict of the model that will be resumed
             from. None if the checkpoint does not exist
-        hyps: dict
+        config: dict
             the modified hyperparameters. This does not reference the
-            argued hyps object. But will be a deep copy of the argued
-            hyps if `in_place` is true.
+            argued config object. But will be a deep copy of the argued
+            config if `in_place` is true.
     """
     # Ignore keys are used to override the hyperparams json associated
     # with the loaded training. In otherwords, use the ignore keys
@@ -52,51 +53,47 @@ def get_resume_checkpt(hyps, in_place=False, verbose=True):
         "save_root",
         "resume_folder",
     ]
-    ignore_keys = utils.try_key(hyps,'ignore_keys',ignore_keys)
-    resume_folder = utils.try_key(hyps,'resume_folder', None)
+    ignore_keys = utils.try_key(config,'ignore_keys',ignore_keys)
+    resume_folder = utils.try_key(config,'resume_folder', None)
     if not in_place: 
-        hyps = {**hyps}
+        config = {**config}
     if resume_folder is not None and resume_folder != "":
         checkpt = io.load_checkpoint(resume_folder)
         # Check if argued number of epochs exceeds the total epochs
         # of the to-be-resumed training
-        if verbose and training_exceeds_epochs(hyps, checkpt):
+        if verbose and training_exceeds_epochs(config, checkpt):
             print("Could not resume due to epoch count")
             print("Performing fresh training")
         else:
             if verbose:
-                print("Loading hyps from", resume_folder)
-            temp_hyps = checkpt['hyps']
+                print("Loading config from", resume_folder)
+            temp_hyps = checkpt['config']
             for k,v in temp_hyps.items():
                 if k not in ignore_keys:
-                    hyps[k] = v
-            hyps["seed"] = utils.try_key(hyps, "seed", 0)
-            if hyps["seed"] is None: hyps["seed"] = 0
-            hyps['seed'] += int(time.time()) # For fresh data
+                    config[k] = v
+            config["seed"] = utils.try_key(config, "seed", 0)
+            if config["seed"] is None: config["seed"] = 0
+            config['seed'] += int(time.time()) # For fresh data
             s = " Restarted training from epoch "+str(checkpt['epoch'])
-            hyps['description'] = utils.try_key(
-                hyps,
-                "description",
-                ""
-            )
-            hyps['description'] += s
-            hyps['ignore_keys'] = ignore_keys
-            hyps["save_folder"] = resume_folder
-            return checkpt, hyps
-    return None, hyps
+            config['description'] = config.get("description", "")
+            config['description'] += s
+            config['ignore_keys'] = ignore_keys
+            config["save_folder"] = resume_folder
+            return checkpt, config
+    return None, config
 
-def training_exceeds_epochs(hyps, checkpt):
+def training_exceeds_epochs(config, checkpt):
     """
     Helper function to deterimine if the training to be resumed has
     already exceeded the number of epochs argued in the resumed
     training.
 
     Args:
-        hyps: dict
+        config: dict
         checkpt: dict
     """
     n_epochs = -1
-    if "n_epochs" in hyps: n_epochs = hyps["n_epochs"]
+    if "n_epochs" in config: n_epochs = config["n_epochs"]
     return (checkpt['epoch']>=(n_epochs-1) or n_epochs == -1)
 
 def get_git_revision_hash():
@@ -107,53 +104,53 @@ def get_git_revision_hash():
             ['git', 'rev-parse', 'HEAD']
         ).decode('ascii').strip()
 
-def record_session(hyps, model):
+def record_session(config, model):
     """
     Writes important parameters to file. If 'resume_folder' is an entry
-    in the hyps dict, then the txt file is appended to instead of being
+    in the config dict, then the txt file is appended to instead of being
     overwritten.
 
-    hyps: dict
+    config: dict
         dict of relevant hyperparameters
     model: torch nn.Module
         the model to be trained
     """
     try:
-        hyps["git_hash"] = utils.try_key( 
-            hyps,"git_hash",get_git_revision_hash()
+        config["git_hash"] = utils.try_key( 
+            config,"git_hash",get_git_revision_hash()
         )
     except:
         s="you aren't using git?! you should really version control..."
-        hyps["git_hash"] = s
+        config["git_hash"] = s
         print(s)
-    git_hash = hyps["git_hash"]
-    sf = hyps['save_folder']
+    git_hash = config["git_hash"]
+    sf = config['save_folder']
     if not os.path.exists(sf):
         os.mkdir(sf)
     h = "hyperparams"
-    mode = "a" if "resume_folder" in hyps else "w"
+    mode = "a" if "resume_folder" in config else "w"
     with open(os.path.join(sf,h+".txt"),mode) as f:
         dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         f.write(dt_string)
         f.write("\nGit Hash: {}".format(git_hash))
         f.write("\n"+str(model)+'\n')
-        for k in sorted(hyps.keys()):
-            f.write(str(k) + ": " + str(hyps[k]) + "\n")
+        for k in sorted(config.keys()):
+            f.write(str(k) + ": " + str(config[k]) + "\n")
     temp_hyps = dict()
-    keys = list(hyps.keys())
-    temp_hyps = {k:v for k,v in hyps.items()}
+    keys = list(config.keys())
+    temp_hyps = {k:v for k,v in config.items()}
     for k in keys:
-        if type(hyps[k]) == type(np.array([])):
+        if type(config[k]) == type(np.array([])):
             del temp_hyps[k]
-        elif type(hyps[k]) == type(set()): temp_hyps[k] = list(hyps[k])
+        elif type(config[k])==type(set()): temp_hyps[k] = list(config[k])
     io.save_json(temp_hyps, os.path.join(sf,h+".json"))
 
-def fill_hyper_q(hyps, hyp_ranges, keys, hyper_q, idx=0):
+def fill_hyper_q(config, hyp_ranges, keys, hyper_q, idx=0):
     """
     Recursive function to load each of the hyperparameter combinations
     onto a queue.
 
-    hyps - dict of hyperparameters created by a HyperParameters object
+    config - dict of hyperparameters created by a HyperParameters object
         type: dict
         keys: name of hyperparameter
         values: value of hyperparameter
@@ -189,21 +186,21 @@ def fill_hyper_q(hyps, hyp_ranges, keys, hyper_q, idx=0):
     idx - the index of the current key to be searched over
 
     Returns:
-        hyper_q: deque of dicts `hyps`
+        hyper_q: deque of dicts `config`
     """
     # Base call, saves the hyperparameter combination
     if idx >= len(keys):
         # Load q
-        hyps['search_keys'] = ""
+        config['search_keys'] = ""
         for k in keys:
             if isinstance(hyp_ranges[k],dict):
                 for rk in hyp_ranges[k].keys():
-                    s = io.prep_search_keys(str(hyps[rk]))
-                    hyps['search_keys'] += "_" + str(rk)+s
+                    s = io.prep_search_keys(str(config[rk]))
+                    config['search_keys'] += "_" + str(rk)+s
             else:
-                s = io.prep_search_keys(str(hyps[k]))
-                hyps['search_keys'] += "_" + str(k)+s
-        hyper_q.append({**hyps})
+                s = io.prep_search_keys(str(config[k]))
+                config['search_keys'] += "_" + str(k)+s
+        hyper_q.append({**config})
 
     # Non-base call. Sets a hyperparameter to a new search value and
     # passes down the dict.
@@ -214,13 +211,13 @@ def fill_hyper_q(hyps, hyp_ranges, keys, hyper_q, idx=0):
             rkeys = list(hyp_ranges[key].keys())
             for i in range(len(hyp_ranges[key][rkeys[0]])):
                 for rkey in rkeys:
-                    hyps[rkey] = hyp_ranges[key][rkey][i]
-                hyper_q = fill_hyper_q(hyps, hyp_ranges, keys, hyper_q,
+                    config[rkey] = hyp_ranges[key][rkey][i]
+                hyper_q = fill_hyper_q(config, hyp_ranges, keys, hyper_q,
                                                                idx+1)
         else:
             for param in hyp_ranges[key]:
-                hyps[key] = param
-                hyper_q = fill_hyper_q(hyps, hyp_ranges, keys, hyper_q,
+                config[key] = param
+                hyper_q = fill_hyper_q(config, hyp_ranges, keys, hyper_q,
                                                                idx+1)
     return hyper_q
 
@@ -247,12 +244,12 @@ def make_hyper_range(low, high, range_len, method="log"):
     param_vals = [float(param_val) for param_val in param_vals]
     return param_vals
 
-def hyper_search(hyps, hyp_ranges, train_fxn):
+def hyper_search(config, hyp_ranges, train_fxn):
     """
     The top level function to create hyperparameter combinations and
     perform trainings.
 
-    hyps: dict
+    config: dict
         the initial hyperparameter dict
         keys: str
         vals: values for the hyperparameters specified by the keys
@@ -265,28 +262,28 @@ def hyper_search(hyps, hyp_ranges, train_fxn):
               keys
     train_fxn: function
         args:
-            hyps: dict
+            config: dict
             verbose: bool
         a function that performs the desired training given the argued
         hyperparams
     """
     starttime = time.time()
 
-    hyps['multi_gpu'] = utils.try_key(hyps,'multi_gpu',False)
-    if hyps['multi_gpu']:
-        hyps["n_gpus"] = utils.try_key(
-            hyps, "n_gpus", torch.cuda.device_count()
+    config['multi_gpu'] = utils.try_key(config,'multi_gpu',False)
+    if config['multi_gpu']:
+        config["n_gpus"] = utils.try_key(
+            config, "n_gpus", torch.cuda.device_count()
         )
         os.environ['MASTER_ADDR'] = '127.0.0.1'     
         os.environ['MASTER_PORT'] = '8021'
 
-    exp_folder = hyps["exp_folder"]
+    exp_folder = config["exp_folder"]
     results_file = os.path.join(exp_folder, "results.txt")
     with open(results_file,'a') as f:
         f.write("Hyperparameters:\n")
-        for k in hyps.keys():
+        for k in config.keys():
             if k not in hyp_ranges:
-                f.write(str(k) + ": " + str(hyps[k]) + '\n')
+                f.write(str(k) + ": " + str(config[k]) + '\n')
         f.write("\nHyperranges:\n")
         for k in hyp_ranges.keys():
             if isinstance(hyp_ranges[k],dict):
@@ -301,7 +298,7 @@ def hyper_search(hyps, hyp_ranges, train_fxn):
         f.write('\n')
 
     hyper_q = deque()
-    hyper_q = fill_hyper_q(hyps, hyp_ranges, list(hyp_ranges.keys()),
+    hyper_q = fill_hyper_q(config, hyp_ranges, list(hyp_ranges.keys()),
                                                       hyper_q, idx=0)
     total_searches = len(hyper_q)
     print("n_searches:", total_searches)
@@ -311,25 +308,25 @@ def hyper_search(hyps, hyp_ranges, train_fxn):
     while not len(hyper_q)==0:
         print("\n\nSearches left:", len(hyper_q),"-- Running Time:",
                                              time.time()-starttime)
-        hyps = hyper_q.popleft()
+        config = hyper_q.popleft()
 
-        res = utils.try_key(hyps, "resume_folder", None)
+        res = utils.try_key(config, "resume_folder", None)
         if res is None or res=="":
-            hyps["model_folder"] = io.get_save_folder(hyps)
-            hyps["save_folder"] = os.path.join(
-                hyps["exp_folder"], hyps["model_folder"]
+            config["model_folder"] = io.get_save_folder(config)
+            config["save_folder"] = os.path.join(
+                config["exp_folder"], config["model_folder"]
             )
-            if not os.path.exists(hyps["save_folder"]):
-                os.mkdir(hyps["save_folder"])
-            print("Saving to", hyps["save_folder"])
+            if not os.path.exists(config["save_folder"]):
+                os.mkdir(config["save_folder"])
+            print("Saving to", config["save_folder"])
 
         verbose = True
-        if hyps['multi_gpu']:
-            mp.spawn(train_fxn, nprocs=hyps['n_gpus'],
+        if config['multi_gpu']:
+            mp.spawn(train_fxn, nprocs=config['n_gpus'],
                                 join=True,
-                                args=(hyps,verbose))
+                                args=(config,verbose))
         else:
-            train_fxn(0, hyps=hyps, verbose=verbose)
+            train_fxn(0, config=config, verbose=verbose)
 
 def run_training(train_fxn):
     """
@@ -341,35 +338,37 @@ def run_training(train_fxn):
     train_fxn: function
         this the training function that will carry out the training
         args:
-            hyps: dict
+            config: dict
             verbose: bool
     """
-    hyps = io.load_json_or_yaml(sys.argv[1])
+    config = io.load_json_or_yaml(sys.argv[1])
     print()
     print("Using hyperparams file:", sys.argv[1])
+    config["lr"] = config.get("lr", 1e-3)
     if len(sys.argv) < 3:
-        ranges = {"lr": [hyps['lr']]}
+        ranges = {"lr": [config['lr']]}
     else:
         ranges = io.load_json_or_yaml(sys.argv[2])
         print("Using hyperranges file:", sys.argv[2])
     print()
 
-    keys = sorted(list(hyps.keys()))
+    keys = sorted(list(config.keys()))
     hyps_str = ""
     for k in keys:
         if k not in ranges:
-            hyps_str += "{}: {}\n".format(k,hyps[k])
+            hyps_str += "{}: {}\n".format(k,config[k])
     print("Hyperparameters:")
     print(hyps_str)
     print("\nSearching over:")
     print("\n".join(["{}: {}".format(k,v) for k,v in ranges.items()]))
 
-    exp_folder = hyps['exp_name']
-    if "save_root" in hyps:
-        hyps['save_root'] = os.path.expanduser(hyps['save_root'])
-        if not os.path.exists(hyps['save_root']):
-            os.mkdir(hyps['save_root'])
-        exp_folder = os.path.join(hyps['save_root'], exp_folder)
+    config["exp_name"] = config.get('exp_name', "myexperiment")
+    exp_folder = config['exp_name']
+    if "save_root" in config:
+        config['save_root'] = os.path.expanduser(config['save_root'])
+        if not os.path.exists(config['save_root']):
+            os.mkdir(config['save_root'])
+        exp_folder = os.path.join(config['save_root'], exp_folder)
     print("Main Exp Folder:", exp_folder)
     sleep_time = 8
     if os.path.exists(exp_folder):
@@ -386,11 +385,11 @@ def run_training(train_fxn):
                     shutil.rmtree(path, ignore_errors=True)
         else:
             s = "You have {} seconds to cancel experiment name {}:"
-            print(s.format(sleep_time, hyps['exp_name']))
+            print(s.format(sleep_time, config['exp_name']))
             i,_,_ = select.select([sys.stdin], [],[],sleep_time)
     else:
         s = "You have {} seconds to cancel experiment name {}:"
-        print(s.format(sleep_time, hyps['exp_name']))
+        print(s.format(sleep_time, config['exp_name']))
         i,_,_ = select.select([sys.stdin], [],[],sleep_time)
     print()
 
@@ -398,16 +397,16 @@ def run_training(train_fxn):
     start_time = time.time()
 
     # Make results file
-    exp_folder = hyps['exp_name']
-    if "save_root" in hyps:
-        hyps['save_root'] = os.path.expanduser(hyps['save_root'])
-        if not os.path.exists(hyps['save_root']):
-            os.mkdir(hyps['save_root'])
-        exp_folder = os.path.join(hyps['save_root'], exp_folder)
-    hyps["exp_folder"] = exp_folder
+    exp_folder = config['exp_name']
+    if "save_root" in config:
+        config['save_root'] = os.path.expanduser(config['save_root'])
+        if not os.path.exists(config['save_root']):
+            os.mkdir(config['save_root'])
+        exp_folder = os.path.join(config['save_root'], exp_folder)
+    config["exp_folder"] = exp_folder
     if not os.path.exists(exp_folder):
         os.mkdir(exp_folder)
 
-    hyper_search(hyps, ranges, train_fxn)
+    hyper_search(config, ranges, train_fxn)
     print("Total Execution Time:", time.time() - start_time)
 

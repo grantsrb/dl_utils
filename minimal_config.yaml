@@ -1,0 +1,5 @@
+save_root: "./"
+exp_name: "randconst1_max20"
+save: true
+
+lr: 0.001

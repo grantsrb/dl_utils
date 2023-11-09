@@ -174,7 +174,7 @@ class SequenceModule(tmods.CoreModule):
         config.update(config_kwargs)
         return config
 
-    def forward(self, src:torch.Tensor,
+    def forward(self, inpts:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
@@ -184,7 +184,7 @@ class SequenceModule(tmods.CoreModule):
                       *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
                 an optional attention mask. if transformer uses auto-
                 regressive prediction, simply mark `is_causal` to true
@@ -211,14 +211,14 @@ class SequenceModule(tmods.CoreModule):
         """
         if tforce:
             ret_dict = self.tforce_fwd(
-                src=src,
+                inpts=inpts,
                 mask=mask,
                 pad_mask=pad_mask,
                 is_causal=is_causal
             )
         else:
             ret_dict = self.freedom_fwd(
-                src=src,
+                inpts=inpts,
                 mask=mask,
                 pad_mask=pad_mask,
                 is_causal=is_causal,
@@ -227,24 +227,25 @@ class SequenceModule(tmods.CoreModule):
             )
         return ret_dict
 
-class LSTM(SequenceModule):
-    def __init__(self, *args, **kwargs):
+class RNN(SequenceModule):
+    def __init__(self, rnn_type="RNNCell", *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.model_type = 'LSTM'
+        self.model_type = "RNN"
+        self.rnn_type = getattr(torch.nn, rnn_type)
 
         if self.n_tokens:
             self.embeddings = torch.nn.Embedding(
                 self.n_tokens, self.d_model
             )
         self.pre_norm = torch.nn.LayerNorm(self.d_model)
-        self.lstms = torch.nn.ModuleList([])
+        self.rnns = torch.nn.ModuleList([])
         self.layer_norms = torch.nn.ModuleList([])
         self.h_norms = torch.nn.ModuleList([])
         for i in range(self.n_layers):
             self.layer_norms.append( torch.nn.LayerNorm(self.d_model) )
             self.h_norms.append( torch.nn.LayerNorm(self.d_model) )
-            self.lstms.append(
-                torch.nn.LSTMCell(self.d_model, self.d_model)
+            self.rnns.append(
+                self.rnn_type(self.d_model, self.d_model)
             )
         d_hid = self.d_model*4
         modules = []
@@ -270,12 +271,169 @@ class LSTM(SequenceModule):
         """
         n = self.n_layers
         hs = [torch.zeros(batch_size,self.d_model) for _ in range(n)]
-        cs = [torch.zeros(batch_size,self.d_model) for _ in range(n)]
         d = self.get_device()
-        return [h.to(d) for h in hs], [c.to(d) for c in cs]
+        return [h.to(d) for h in hs]
     
     def step(self,
-             src=None,
+             inpts=None,
+             pad_mask=None,
+             hs=None,
+             temperature=None,
+             prev_logits=None,
+             inputs_embeds=None,
+             *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize]``
+                if None, inputs_embeds must be not None
+            pad_mask: BoolTensor, shape ``[bsize]``
+                1s/Trues denote padding, 0s/Falses denote not padding
+            hs: list of Tensors with shape (B, D)
+                a list of h vectors for each lstm
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            prev_logits: torch Tensor [bsize, n_tokens] or None
+                optionally argue the previous logits as a vector to
+                contain the most recent predictions
+            inputs_embeds: None or Tensor, shape (B,D)
+                optionally argue the embeddings directly instead of
+                token ids.
+        Returns:
+            dict:
+                logits: Tensor of shape (B, N)
+                pred_ids: Tensor of shape (B,)
+                hs: list of Tensors with shape (B, D)
+                    a list of updated h vectors for each lstm
+        """
+        if inpts is None:
+            B = inputs_embeds.shape[0]
+            pred_ids = torch.zeros(B,device=self.get_device()).long()
+        else:
+            B = inpts.shape[0]
+            pred_ids = inpts.detach().data.clone()
+
+        if pad_mask is None:
+            idx = torch.zeros(B, device=self.get_device()).bool()
+        else:
+            idx = ~pad_mask.bool()
+
+        if prev_logits is None:
+            # will be used to store the predicted logits
+            logits = torch.zeros(B,self.out_tokens).to(self.get_device())
+        else:
+            logits = prev_logits.detach().data.clone()
+
+        if inputs_embeds is None:
+            inpt = self.embeddings(inpts)[idx]
+        else: inpt = inputs_embeds[idx]
+        
+        new_hs = [ h.clone() for h in hs ]
+        inpt = self.pre_norm(inpt)
+        if len(inpt)>0:
+            # Loop through lstm layers of model
+            z = zip(self.rnns, self.layer_norms, self.h_norms)
+            for l,(rnn, norm, h_norm) in enumerate(z):
+                h = hs[l][idx]
+                if self.h_norm: h = h_norm(h)
+                h = rnn(inpt, h)
+                inpt = norm(h)
+                new_hs[l][idx] = h
+            logits[idx] = self.decoder(inpt)
+            pred_ids[idx] = self.sample_with_temperature(
+                logits[idx], temperature
+            )
+        return {
+            "logits":   logits,
+            "pred_ids": pred_ids,
+            "hs": new_hs, 
+        }
+
+    def forward(self, inpts:torch.Tensor,
+                      pad_mask:torch.Tensor=None,
+                      n_steps:int=0,
+                      temperature=None,
+                      inputs_embeds=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            inputs_embeds: None or Tensor, shape (B,S,D)
+                optionally argue the embeddings directly instead of
+                token ids.
+        Returns:
+            ret_dict: dict
+                logits: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+                pred_ids: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+        """
+        if not inputs_embeds:
+            embs = self.embeddings(inpts)
+        else: embs = inputs_embeds
+
+        B,S,D = embs.shape
+        logits = []
+        pred_ids = []
+        hs = self.get_fresh_recurrent_vectors(B)
+
+        # Loop through sequence
+        for step in range(S+n_steps):
+            if step<embs.shape[1]:
+                pmask = pad_mask[:,step]
+                inpt = embs[:,step]
+            else:
+                inpt = self.embeddings(pred_ids[-1])
+            ret_dict = self.step(
+                inputs_embeds=inpt,
+                pad_mask=pmask,
+                hs=hs,
+                temperature=temperature
+            )
+            hs = ret_dict["hs"]
+            logits.append(ret_dict["logits"])
+            if step<S-1: pred_ids.append(inpts[:,step+1])
+            else: pred_ids.append(ret_dict["pred_ids"])
+        return {
+            "logits": torch.stack(logits, dim=1),
+            "pred_ids": torch.stack(pred_ids,dim=1),
+            "hs": hs
+        }
+
+class GRU(RNN):
+    def __init__(self, rnn_type="GRUCell", *args, **kwargs):
+        super().__init__(*args, rnn_type=rnn_type, **kwargs)
+        self.model_type = "GRU"
+
+class LSTM(RNN):
+    def __init__(self, rnn_type="LSTMCell", *args, **kwargs):
+        super().__init__(*args, rnn_type=rnn_type, **kwargs)
+        self.model_type = 'LSTM'
+
+    def get_fresh_recurrent_vectors(self, batch_size=1):
+        """
+        Args:
+            batch_size: int
+        Returns:
+            hs: list of tensors with shape (B, H)
+                the length of the list is determined by the number of lstms
+                in the model.
+            cs: list of tensors with shape (B, H)
+                the length of the list is determined by the number of lstms
+                in the model.
+        """
+        hs = super().get_fresh_recurrent_vectors(batch_size=batch_size)
+        cs = super().get_fresh_recurrent_vectors(batch_size=batch_size)
+        return hs,cs
+    
+    def step(self,
+             inpts=None,
              pad_mask=None,
              hs=None,
              cs=None,
@@ -285,7 +443,7 @@ class LSTM(SequenceModule):
              *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize]``
+            inpts: Tensor, shape ``[bsize]``
                 if None, inputs_embeds must be not None
             pad_mask: BoolTensor, shape ``[bsize]``
                 1s/Trues denote padding, 0s/Falses denote not padding
@@ -311,12 +469,12 @@ class LSTM(SequenceModule):
                 cs: list of Tensors with shape (B, D)
                     a list of updated c vectors for each lstm
         """
-        if src is None:
+        if inpts is None:
             B = inputs_embeds.shape[0]
             pred_ids = torch.zeros(B,device=self.get_device()).long()
         else:
-            B = src.shape[0]
-            pred_ids = src.detach().data.clone()
+            B = inpts.shape[0]
+            pred_ids = inpts.detach().data.clone()
 
         if pad_mask is None:
             idx = torch.zeros(B, device=self.get_device()).bool()
@@ -330,7 +488,7 @@ class LSTM(SequenceModule):
             logits = prev_logits.detach().data.clone()
 
         if inputs_embeds is None:
-            inpt = self.embeddings(src)[idx]
+            inpt = self.embeddings(inpts)[idx]
         else: inpt = inputs_embeds[idx]
         
         new_hs = [ h.clone() for h in hs ]
@@ -357,7 +515,7 @@ class LSTM(SequenceModule):
             "cs": new_cs,
         }
 
-    def forward(self, src:torch.Tensor,
+    def forward(self, inpts:torch.Tensor,
                       pad_mask:torch.Tensor=None,
                       n_steps:int=0,
                       temperature=None,
@@ -365,7 +523,7 @@ class LSTM(SequenceModule):
                       *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             pad_mask: Tensor, shape ``[bsize, seq_len]``
                 true means padding
             n_steps: int
@@ -383,7 +541,7 @@ class LSTM(SequenceModule):
                 pred_ids: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
         if not inputs_embeds:
-            embs = self.embeddings(src)
+            embs = self.embeddings(inpts)
         else: embs = inputs_embeds
 
         B,S,D = embs.shape
@@ -406,7 +564,7 @@ class LSTM(SequenceModule):
             )
             hs,cs = ret_dict["hs"], ret_dict["cs"]
             logits.append(ret_dict["logits"])
-            if step<S-1: pred_ids.append(src[:,step+1])
+            if step<S-1: pred_ids.append(inpts[:,step+1])
             else: pred_ids.append(ret_dict["pred_ids"])
         return {
             "logits": torch.stack(logits, dim=1),
@@ -567,14 +725,14 @@ class Transformer(SequenceModule):
         )
 
     def tforce_fwd(self,
-                   src:torch.Tensor,
+                   inpts:torch.Tensor,
                    mask:torch.Tensor=None,
                    pad_mask:torch.Tensor=None,
                    inputs_embeds:torch.Tensor=None,
                    *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
                 true means unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
@@ -590,14 +748,14 @@ class Transformer(SequenceModule):
             attn_mask = padmask2attnmask(attn_mask)
             attn_mask = attn_mask&~mask
         output = self.encoder(
-            src,
+            inpts,
             attention_mask=attn_mask,
             inputs_embeds=inputs_embeds,
         )
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
-            inpts = output.last_hidden_state.reshape(-1,og_shape[-1])
-            logits = self.decoder(inpts).reshape(*og_shape[:-1], -1)
+            state = output.last_hidden_state.reshape(-1,og_shape[-1])
+            logits = self.decoder(state).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
         return {
             "logits":logits,
@@ -605,7 +763,7 @@ class Transformer(SequenceModule):
         }
 
     def freedom_fwd(self,
-                    src:torch.Tensor,
+                    inpts:torch.Tensor,
                     mask:torch.Tensor=None,
                     pad_mask:torch.Tensor=None,
                     is_causal:bool=None,
@@ -618,7 +776,7 @@ class Transformer(SequenceModule):
                     *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
                 true means unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
@@ -653,10 +811,10 @@ class Transformer(SequenceModule):
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
         n_loops = n_steps + 1
-        if src is None:
+        if inpts is None:
             B,S = inputs_embeds.shape[:2]
         else:
-            B,S = src.shape
+            B,S = inpts.shape
 
         pad_mask = torch.nn.functional.pad(
             ~(pad_mask.bool()), (0, n_loops), value=True
@@ -668,21 +826,21 @@ class Transformer(SequenceModule):
         pred_ids = torch.zeros(
             (B,S+n_loops), device=self.get_device()
         ).long()
-        if src is not None:
-            pred_ids[:,:S] = src
+        if inpts is not None:
+            pred_ids[:,:S] = inpts
         logits = torch.zeros(
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=self.get_device()
         )
         logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
-            index=src[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            index=inpts[:, 1-incl_all_inpts:S, None],
+            inpts=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
 
         # Need to ensure we use the appropriate input type between
-        # the src ids and the input embeddings
-        if src is None:
+        # the inpts ids and the input embeddings
+        if inpts is None:
             inpt_emb = inputs_embeds
             inpt = None
         else:
@@ -710,8 +868,8 @@ class Transformer(SequenceModule):
             past_key_values = output.past_key_values
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
-                inpts = output.last_hidden_state[:,-1]
-                pred = self.decoder(inpts)
+                state = output.last_hidden_state[:,-1]
+                pred = self.decoder(state)
             else: pred = output.logits[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
             argmaxs = self.sample_with_temperature(
@@ -783,14 +941,14 @@ class HFTransformer(SequenceModule):
         self.init_weights()
 
     def tforce_fwd(self,
-                   src:torch.Tensor,
+                   inpts:torch.Tensor,
                    mask:torch.Tensor=None,
                    pad_mask:torch.Tensor=None,
                    inputs_embeds:torch.Tensor=None,
                    *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
                 true means unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
@@ -806,14 +964,14 @@ class HFTransformer(SequenceModule):
             attn_mask = padmask2attnmask(attn_mask)
             attn_mask = attn_mask&~mask
         output = self.encoder(
-            src,
+            inpts,
             attention_mask=attn_mask,
             inputs_embeds=inputs_embeds,
         )
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
-            inpts = output.last_hidden_state.reshape(-1,og_shape[-1])
-            logits = self.decoder(inpts).reshape(*og_shape[:-1], -1)
+            state = output.last_hidden_state.reshape(-1,og_shape[-1])
+            logits = self.decoder(state).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
         return {
             "logits":logits,
@@ -821,7 +979,7 @@ class HFTransformer(SequenceModule):
         }
 
     def freedom_fwd(self,
-                    src:torch.Tensor,
+                    inpts:torch.Tensor,
                     mask:torch.Tensor=None,
                     pad_mask:torch.Tensor=None,
                     is_causal:bool=None,
@@ -834,7 +992,7 @@ class HFTransformer(SequenceModule):
                     *args, **kwargs):
         """
         Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
+            inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
                 true means unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
@@ -869,10 +1027,10 @@ class HFTransformer(SequenceModule):
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
         n_loops = n_steps + 1
-        if src is None:
+        if inpts is None:
             B,S = inputs_embeds.shape[:2]
         else:
-            B,S = src.shape
+            B,S = inpts.shape
 
         pad_mask = torch.nn.functional.pad(
             ~(pad_mask.bool()), (0, n_loops), value=True
@@ -884,21 +1042,21 @@ class HFTransformer(SequenceModule):
         pred_ids = torch.zeros(
             (B,S+n_loops), device=self.get_device()
         ).long()
-        if src is not None:
-            pred_ids[:,:S] = src
+        if inpts is not None:
+            pred_ids[:,:S] = inpts
         logits = torch.zeros(
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=self.get_device()
         )
         logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
-            index=src[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            index=inpts[:, 1-incl_all_inpts:S, None],
+            inpts=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
 
         # Need to ensure we use the appropriate input type between
-        # the src ids and the input embeddings
-        if src is None:
+        # the inpts ids and the input embeddings
+        if inpts is None:
             inpt_emb = inputs_embeds
             inpt = None
         else:
@@ -926,8 +1084,8 @@ class HFTransformer(SequenceModule):
             past_key_values = output.past_key_values
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
-                inpts = output.last_hidden_state[:,-1]
-                pred = self.decoder(inpts)
+                states = output.last_hidden_state[:,-1]
+                pred = self.decoder(states)
             else: pred = output.logits[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
             argmaxs = self.sample_with_temperature(

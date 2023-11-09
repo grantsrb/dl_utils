@@ -343,19 +343,31 @@ def load_model(path, models, load_sd=True, use_best=False,
         try:
             model.load_state_dict(data["state_dict"])
         except:
-            print("failed to load state dict, attempting fix")
-            sd = data["state_dict"]
-            m_sd = model.state_dict()
-            keys = {*sd.keys(), *m_sd.keys()}
-            for k in keys:
-                if k not in sd:
-                    print("Error for", k)
-                    sd[k] = getattr(model, k)
-                if k not in m_sd:
-                    print("Error for", k)
-                    setattr(model, k, sd[k])
-            model.load_state_dict(sd)
-            print("succeeded!")
+            try:
+                sd = {k:v.clone() for k,v in data["state_dict"].items()}
+                m_sd = model.state_dict()
+                keys = list(sd.keys())
+                for k in keys:
+                    if "model." in key and key not in m_sd:
+                        # Simply remove "model." from keys
+                        new_key = ".".join(key.split(".")[1:])
+                        sd[new_key] = sd[key]
+                        del sd[key]
+                model.load_state_dict(sd)
+            except:
+                print("failed to load state dict, attempting fix")
+                sd = data["state_dict"]
+                m_sd = model.state_dict()
+                keys = {*sd.keys(), *m_sd.keys()}
+                for k in keys:
+                    if k not in sd:
+                        print("Error for", k)
+                        sd[k] = getattr(model, k)
+                    if k not in m_sd:
+                        print("Error for", k)
+                        setattr(model, k, sd[k])
+                model.load_state_dict(sd)
+                print("succeeded!")
     else:
         print("state dict not loaded!")
     return model

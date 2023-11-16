@@ -237,6 +237,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
                         [str(p) for p in preds[i].cpu().data.tolist()]
                     )
                     logstr += s+"\n"
+                    print(s)
                     print()
                 print()
                 s = "Final Stats, Epoch: {}".format(epoch)

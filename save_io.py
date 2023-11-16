@@ -3,6 +3,9 @@ import pickle
 import os
 import json
 import yaml
+from datetime import datetime
+from dl_utils.utils import get_git_revision_hash, package_versions
+import numpy as np
 
 BEST_CHECKPT_NAME = "best_checkpt_0.pt.best"
 
@@ -579,3 +582,58 @@ def load_yaml(file_name):
         yam = yaml.safe_load(f)
     return yam
 
+def record_session(config, model, globals_dict=None):
+    """
+    Writes important parameters to file. If 'resume_folder' is an entry
+    in the config dict, then the txt file is appended to instead of being
+    overwritten.
+
+    config: dict
+        dict of relevant hyperparameters
+    model: torch nn.Module
+        the model to be trained
+    globals_dict: dict
+        just argue `globals()`
+    """
+    try:
+        config["git_hash"] = config.get(
+            "git_hash", get_git_revision_hash()
+        )
+    except:
+        s="you aren't using git?! you should really version control..."
+        config["git_hash"] = s
+        print(s)
+    git_hash = config["git_hash"]
+    sf = config['save_folder']
+    if not os.path.exists(sf):
+        os.mkdir(sf)
+    h = "config"
+    mode = "a" if "resume_folder" in config else "w"
+    packages = package_versions(globals_dict=globals_dict)
+    with open(os.path.join(sf,h+".txt"),mode) as f:
+        dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        f.write(dt_string)
+        f.write("\nGit Hash: {}".format(git_hash))
+        f.write("\nPackage Versions:")
+        for module_name,v in packages.items():
+            f.write("\t{}: {}\n".format(module_name, v))
+        f.write("\n"+str(model)+'\n')
+        for k in sorted(config.keys()):
+            f.write(str(k) + ": " + str(config[k]) + "\n")
+    temp_hyps = dict()
+    keys = list(config.keys())
+    temp_hyps = {k:v for k,v in config.items()}
+    for k in keys:
+        if type(config[k]) == type(np.array([])):
+            del temp_hyps[k]
+        elif type(config[k])==np.int64:
+            temp_hyps[k] = int(temp_hyps[k])
+        elif type(config[k])==type(set()):
+            temp_hyps[k] = list(config[k])
+    if "packages" not in temp_hyps:
+        temp_hyps["packages"] = packages
+    try:
+        save_json(temp_hyps, os.path.join(sf,h+".json"))
+    except:
+        print(temp_hyps)
+        save_json(temp_hyps, os.path.join(sf,h+".json"))

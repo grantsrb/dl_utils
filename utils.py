@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import os
+import sys
+import subprocess
 try:
     import cv2
 except:
@@ -359,3 +361,34 @@ def get_full_cross_mask(step_masks):
         ],dim=-1)
     ],dim=1)
     return cross_mask
+
+def package_versions(globals_dict=None):
+    """
+    Finds the versions of all packages used in this script
+
+    Args:
+        globals_dict: dict
+            just argue `globals()`
+    """
+    if globals_dict is None: globals_dict = globals()
+    packages = dict()
+    modules = list(set(sys.modules) & set(globals_dict))
+    print("Packages:")
+    for module_name in modules:
+        module = sys.modules[module_name]
+        try:
+            v = getattr(module, '__version__', 'unknown')
+            packages[module_name] = v
+            print("\t", module_name, v)
+        except:
+            packages[module_name] = "unknown"
+    return packages
+
+def get_git_revision_hash():
+    """
+    Finds the current git hash
+    """
+    return subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD']
+        ).decode('ascii').strip()
+

@@ -8,6 +8,8 @@ import accelerate
 
 from save_io import save_checkpt, load_json_or_yaml
 from datas import get_datasets
+from training import record_session
+from utils import package_versions
 from seq_models import make_model
 from schedulers import DecayScheduler
 
@@ -84,6 +86,13 @@ def train(rank, config, verbose=True, *args, **kwargs):
     val_loader = accelerator.prepare(val_loader)
 
     #############################################################
+    # Save Configuration
+    #############################################################
+    if config.get("save", False):
+        record_session(config, model)
+
+
+    #############################################################
     # Training
     #############################################################
     n_epochs = config.get("n_epochs", 100)
@@ -154,13 +163,23 @@ def train(rank, config, verbose=True, *args, **kwargs):
         train_loss = round(avg_loss/div, dec)
         train_acc  = round(avg_acc/div, dec)
         if verbose:
+            s = "Example Train Preds:"
             print()
-            print("Example Train Preds:")
+            print(s)
+            logstr += s+"\n"
             preds = package["pred_ids"]
             targs = data["output_ids"]
             for i in range(min(3,len(preds))):
-                print("Targ:", targs[i].cpu().data.tolist())
-                print("Pred:", preds[i].cpu().data.tolist())
+                s = "Targ: "+", ".join(
+                    [str(t) for t in targs[i].cpu().data.tolist()]
+                )
+                logstr += s+"\n"
+                print(s)
+                s = "Pred: "+", ".join(
+                    [str(p) for p in preds[i].cpu().data.tolist()]
+                )
+                logstr += s+"\n\n"
+                print(s)
                 print()
 
         #############################################################
@@ -203,6 +222,23 @@ def train(rank, config, verbose=True, *args, **kwargs):
             if config.get("exp_name", "deleteme")=="test": break
             if verbose:
                 print()
+                s = "Example Val Preds:"
+                print(s)
+                logstr += s+"\n"
+                preds = package["pred_ids"]
+                targs = data["output_ids"]
+                for i in range(min(3,len(preds))):
+                    s = "Targ: "+", ".join(
+                        [str(t) for t in targs[i].cpu().data.tolist()]
+                    )
+                    logstr += s+"\n"
+                    print(s)
+                    s = "Pred: "+", ".join(
+                        [str(p) for p in preds[i].cpu().data.tolist()]
+                    )
+                    logstr += s+"\n"
+                    print()
+                print()
                 s = "Final Stats, Epoch: {}".format(epoch)
                 print(s)
                 logstr += "\n" + s + "\n"
@@ -222,21 +258,12 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 print(s)
 
                 print()
-                print("Example Val Preds:")
-                preds = package["pred_ids"]
-                targs = data["output_ids"]
-                for i in range(min(3,len(preds))):
-                    print("Targ:", targs[i].cpu().data.tolist())
-                    print("Pred:", preds[i].cpu().data.tolist())
-                    print()
-                print()
                 print()
 
         ##############################################################
         #### SAVING
         ##############################################################
-        if rank==0 and epoch%val_mod==0:
-            if config.get( "save", False ):
+        if rank==0 and epoch%val_mod==0 and config.get("save", False):
                 save_dict = {
                     "mid_epoch": False,
                     "epoch":       epoch,
@@ -292,28 +319,6 @@ def config_error_catching(config):
     are changed to what the experimenter meant.
     """
     return config
-
-def package_versions(globals_dict=None):
-    """
-    Finds the versions of all packages used in this script
-
-    Args:
-        globals_dict: dict
-            just argue `globals()`
-    """
-    if globals_dict is None: globals_dict = globals()
-    packages = dict()
-    modules = list(set(sys.modules) & set(globals_dict))
-    print("Packages:")
-    for module_name in modules:
-        module = sys.modules[module_name]
-        try:
-            v = getattr(module, '__version__', 'unknown')
-            packages[module_name] = v
-            print("\t", module_name, v)
-        except:
-            packages[module_name] = "unknown"
-    return packages
 
 if __name__=="__main__":
     config = { }

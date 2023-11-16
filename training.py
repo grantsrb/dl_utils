@@ -1,17 +1,13 @@
-import subprocess
 import sys
 import os
 import numpy as np
 import torch
 import time
-import math
 from collections import deque
 import dl_utils.save_io as io
-import dl_utils.utils as utils
 import select
 import shutil
 import torch.multiprocessing as mp
-from datetime import datetime
 
 def get_resume_checkpt(config, in_place=False, verbose=True):
     """
@@ -53,8 +49,8 @@ def get_resume_checkpt(config, in_place=False, verbose=True):
         "save_root",
         "resume_folder",
     ]
-    ignore_keys = utils.try_key(config,'ignore_keys',ignore_keys)
-    resume_folder = utils.try_key(config,'resume_folder', None)
+    ignore_keys = config.get('ignore_keys',ignore_keys)
+    resume_folder = config.get('resume_folder', None)
     if not in_place: 
         config = {**config}
     if resume_folder is not None and resume_folder != "":
@@ -71,7 +67,7 @@ def get_resume_checkpt(config, in_place=False, verbose=True):
             for k,v in temp_hyps.items():
                 if k not in ignore_keys:
                     config[k] = v
-            config["seed"] = utils.try_key(config, "seed", 0)
+            config["seed"] = config.get( "seed", 0)
             if config["seed"] is None: config["seed"] = 0
             config['seed'] += int(time.time()) # For fresh data
             s = " Restarted training from epoch "+str(checkpt['epoch'])
@@ -95,55 +91,6 @@ def training_exceeds_epochs(config, checkpt):
     n_epochs = -1
     if "n_epochs" in config: n_epochs = config["n_epochs"]
     return (checkpt['epoch']>=(n_epochs-1) or n_epochs == -1)
-
-def get_git_revision_hash():
-    """
-    Finds the current git hash
-    """
-    return subprocess.check_output(
-            ['git', 'rev-parse', 'HEAD']
-        ).decode('ascii').strip()
-
-def record_session(config, model):
-    """
-    Writes important parameters to file. If 'resume_folder' is an entry
-    in the config dict, then the txt file is appended to instead of being
-    overwritten.
-
-    config: dict
-        dict of relevant hyperparameters
-    model: torch nn.Module
-        the model to be trained
-    """
-    try:
-        config["git_hash"] = utils.try_key( 
-            config,"git_hash",get_git_revision_hash()
-        )
-    except:
-        s="you aren't using git?! you should really version control..."
-        config["git_hash"] = s
-        print(s)
-    git_hash = config["git_hash"]
-    sf = config['save_folder']
-    if not os.path.exists(sf):
-        os.mkdir(sf)
-    h = "hyperparams"
-    mode = "a" if "resume_folder" in config else "w"
-    with open(os.path.join(sf,h+".txt"),mode) as f:
-        dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        f.write(dt_string)
-        f.write("\nGit Hash: {}".format(git_hash))
-        f.write("\n"+str(model)+'\n')
-        for k in sorted(config.keys()):
-            f.write(str(k) + ": " + str(config[k]) + "\n")
-    temp_hyps = dict()
-    keys = list(config.keys())
-    temp_hyps = {k:v for k,v in config.items()}
-    for k in keys:
-        if type(config[k]) == type(np.array([])):
-            del temp_hyps[k]
-        elif type(config[k])==type(set()): temp_hyps[k] = list(config[k])
-    io.save_json(temp_hyps, os.path.join(sf,h+".json"))
 
 def fill_hyper_q(config, hyp_ranges, keys, hyper_q, idx=0):
     """
@@ -269,11 +216,9 @@ def hyper_search(config, hyp_ranges, train_fxn):
     """
     starttime = time.time()
 
-    config['multi_gpu'] = utils.try_key(config,'multi_gpu',False)
+    config['multi_gpu'] = config.get('multi_gpu',False)
     if config['multi_gpu']:
-        config["n_gpus"] = utils.try_key(
-            config, "n_gpus", torch.cuda.device_count()
-        )
+        config["n_gpus"] = config.get("n_gpus",torch.cuda.device_count())
         os.environ['MASTER_ADDR'] = '127.0.0.1'     
         os.environ['MASTER_PORT'] = '8021'
 
@@ -310,7 +255,7 @@ def hyper_search(config, hyp_ranges, train_fxn):
                                              time.time()-starttime)
         config = hyper_q.popleft()
 
-        res = utils.try_key(config, "resume_folder", None)
+        res = config.get("resume_folder", None)
         if res is None or res=="":
             config["model_folder"] = io.get_save_folder(config)
             config["save_folder"] = os.path.join(

@@ -558,6 +558,13 @@ def load_json(file_name):
         j = json.loads(s)
     return j
 
+def is_jsonable(x):
+    try:
+        json.dumps(x)
+        return True
+    except (TypeError, OverflowError):
+        return False
+
 def save_json(data, file_name):
     """
     saves a dict to a json file
@@ -566,8 +573,14 @@ def save_json(data, file_name):
     file_name: str
         the path that you would like to save to
     """
-    with open(file_name, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    try:
+        with open(file_name, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except (TypeError, OverflowError):
+        for k in data:
+            if not is_jsonable(data[k]):
+                del data[k]
+                print("Removing", k, "from json")
 
 
 def load_yaml(file_name):

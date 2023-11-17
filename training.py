@@ -9,6 +9,17 @@ import select
 import shutil
 import torch.multiprocessing as mp
 
+def config_error_catching(config):
+    """
+    This function just makes sure that some obvious hyperparameter
+    choices are set and some obviously wrong hyperparameter settings
+    are changed to what the experimenter meant.
+    """
+    config["use_accelerate"] = config.get(
+        "use_accelerate", config.get("use_accelerator", True)
+    )
+    return config
+
 def get_resume_checkpt(config, in_place=False, verbose=True):
     """
     This function cleans up the code to resume from a particular

@@ -835,7 +835,7 @@ class Transformer(SequenceModule):
         logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
             index=inpts[:, 1-incl_all_inpts:S, None],
-            inpts=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
 
         # Need to ensure we use the appropriate input type between
@@ -1051,7 +1051,7 @@ class HFTransformer(SequenceModule):
         logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
             index=inpts[:, 1-incl_all_inpts:S, None],
-            inpts=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
 
         # Need to ensure we use the appropriate input type between
@@ -1475,6 +1475,6 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    model = globals()[config.get("model_type","Transformer")](**config)
+    model = globals()[config.get("model_type","HFTransformer")](**config)
     return LossWrapper(model=model, config=config, **config)
 

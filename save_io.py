@@ -577,10 +577,13 @@ def save_json(data, file_name):
         with open(file_name, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except (TypeError, OverflowError):
-        for k in data:
+        keys = list(data.keys())
+        for k in keys:
             if not is_jsonable(data[k]):
                 del data[k]
                 print("Removing", k, "from json")
+        with open(file_name, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
 
 
 def load_yaml(file_name):
@@ -645,8 +648,4 @@ def record_session(config, model, globals_dict=None):
             temp_hyps[k] = list(config[k])
     if "packages" not in temp_hyps:
         temp_hyps["packages"] = packages
-    try:
-        save_json(temp_hyps, os.path.join(sf,h+".json"))
-    except:
-        print(temp_hyps)
-        save_json(temp_hyps, os.path.join(sf,h+".json"))
+    save_json(temp_hyps, os.path.join(sf,h+".json"))

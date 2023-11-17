@@ -6,9 +6,8 @@ import os
 import sys
 import accelerate
 
-from dl_utils.save_io import save_checkpt, load_json_or_yaml
+from dl_utils.save_io import save_checkpt, load_json_or_yaml, record_session
 from dl_utils.datas import get_datasets
-from dl_utils.training import record_session
 from dl_utils.utils import package_versions
 from dl_utils.seq_models import make_model
 from dl_utils.schedulers import DecayScheduler

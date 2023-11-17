@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import dl_utils.torch_modules as tmods
+import torch
 
 class VisionModule(tmods.CoreModule):
     """
@@ -250,42 +251,44 @@ def _make_layer(block,
         ))
     return nn.Sequential(*layers)
 
-class ResLikeCNN(nn.Module):
+class ResLikeCNN(VisionModule):
     def __init__(self,
                  layer_counts=[2,2,2],
                  leading_norm=True,
                  noise=0,
+                 ksize0=7,
                  *args, **kwargs):
         """
         layer_counts: list of ints
             denotes the number of res blocks for each channel change
+        ksize0: int
+            the first kernel size
         """
-        super().__init__()
+        super().__init__(*args, **kwargs)
 
+        depths = self.depths
         self.in_conv = [nn.Conv2d(
-            self.inpt_shape[-3],
             depths[0],
-            kernel_size=7,
+            depths[1],
+            kernel_size=ksize0,
             stride=2,
             padding=3,
             bias=False
         )]
-        if bnorm:
-            self.in_conv.append(nn.BatchNorm2d(depths[0]))
-        if lnorm:
-            self.in_conv.append(nn.LayerNorm(depths[0]))
-        if noise:
-            self.in_conv.append(tmods.GaussianNoise(noise))
+        if self.bnorm:
+            self.in_conv.append(nn.BatchNorm2d(depths[1]))
+        if self.lnorm:
+            self.in_conv.append(nn.LayerNorm(depths[1]))
         self.in_conv.append(nn.GELU())
         self.in_conv = nn.Sequential(*self.in_conv)
         
         self.blocks = nn.ModuleList([])
         depths.append(depths[-1])
-        for i, (chan,n_layers) in enumerate(zip(depths,layer_counts)):
-            self.blocks.append(self._make_layer(
+        for i, n_layers in enumerate(layer_counts):
+            self.blocks.append(_make_layer(
                 ResBlock,
-                chan,
                 depths[i+1],
+                depths[i+2],
                 n_layers,
                 stride=2 if i!=0 else 1,
                 noise=noise

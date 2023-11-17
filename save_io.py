@@ -4,7 +4,7 @@ import os
 import json
 import yaml
 from datetime import datetime
-from dl_utils.utils import get_git_revision_hash, package_versions
+from .utils import get_git_revision_hash, package_versions
 import numpy as np
 
 BEST_CHECKPT_NAME = "best_checkpt_0.pt.best"

@@ -179,8 +179,11 @@ class SequenceModule(tmods.CoreModule):
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
                       tforce:bool=True,
-                      n_steps:int=10,
+                      n_steps:int=1,
                       temperature=None,
+                      inputs_embeds:torch.Tensor=None,
+                      use_cache=False,
+                      past_key_values=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -203,18 +206,31 @@ class SequenceModule(tmods.CoreModule):
             temperature: float
                 a parameter to adjust the entropy of the
                 token sampling. high temperature means high entropy
+            inputs_embeds: None or FloatTensor (B,S,E)
+                optionally argue input embeddings instead of token ids.
+            past_key_values: tuple of tuple of tensors
+                if use_cache is true, will return saved computations
+                that can be argued on the next pass to save on
+                computational complexity
         Returns:
-            if tforce:
-              Tensor ``[B, S, N_Tokens]``
-            else:
-              Tensor ``[B, S+n_steps, N_Tokens]``
+            ret_dict: dict
+                if tforce:
+                    "pred_ids": torch LongTensor (B,S)
+                    "logits": torch FloatTensor (B,S,NTokens)
+                else:
+                    "pred_ids": torch LongTensor (B,S+NSteps)
+                    "logits": torch FloatTensor (B,S+NSteps,NTokens)
+                "past_key_values": None or tuple of tuple of tensors
         """
         if tforce:
             ret_dict = self.tforce_fwd(
                 inpts=inpts,
                 mask=mask,
                 pad_mask=pad_mask,
-                is_causal=is_causal
+                is_causal=is_causal,
+                use_cache=use_cache,
+                inputs_embeds=inputs_embeds,
+                past_key_values=past_key_values,
             )
         else:
             ret_dict = self.freedom_fwd(
@@ -224,6 +240,9 @@ class SequenceModule(tmods.CoreModule):
                 is_causal=is_causal,
                 n_steps=n_steps,
                 temperature=temperature,
+                use_cache=use_cache,
+                inputs_embeds=inputs_embeds,
+                past_key_values=past_key_values,
             )
         return ret_dict
 
@@ -677,9 +696,7 @@ class Transformer(SequenceModule):
             output_attentions: bool
                 if true, will return the attention weights
         Returns:
-            ret_dict: dict
-                logits:
-            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+            BaseModelOutputWithPast
         """
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
@@ -729,6 +746,8 @@ class Transformer(SequenceModule):
                    mask:torch.Tensor=None,
                    pad_mask:torch.Tensor=None,
                    inputs_embeds:torch.Tensor=None,
+                   past_key_values=None,
+                   use_cache=False,
                    *args, **kwargs):
         """
         Arguments:
@@ -739,8 +758,15 @@ class Transformer(SequenceModule):
                 true means padding
             inputs_embeds: tensor (B,S,E)
                 optionally argue embeddings instead of token ids
+            past_key_values: tuple of tuple of tensors
+                the output of a huggingface cache. used to speed up
+                computations. See huggingface documentation for more
+                details
         Returns:
-            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S)
+                "logits": torch FloatTensor (B,S,N)
+                "past_key_values": None or tuple of tuple of tensors
         """
         # flipped so that true means attend to
         attn_mask = ~(pad_mask.bool())
@@ -751,6 +777,8 @@ class Transformer(SequenceModule):
             inpts,
             attention_mask=attn_mask,
             inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            past_key_values=past_key_values,
         )
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
@@ -759,17 +787,16 @@ class Transformer(SequenceModule):
         else: logits = output.logits
         return {
             "logits":logits,
-            "pred_ids":torch.argmax(logits,dim=-1)
+            "pred_ids":torch.argmax(logits,dim=-1),
+            "past_key_values": getattr(output,"past_key_values",None),
         }
 
     def freedom_fwd(self,
                     inpts:torch.Tensor,
                     mask:torch.Tensor=None,
                     pad_mask:torch.Tensor=None,
-                    is_causal:bool=None,
-                    n_steps:int=10,
+                    n_steps:int=1,
                     incl_all_inpts:bool=False,
-                    pad_pos_skip:bool=False,
                     temperature=None,
                     inputs_embeds=None,
                     past_key_values=None,
@@ -781,10 +808,6 @@ class Transformer(SequenceModule):
                 true means unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
                 true means padding
-            is_causal: bool
-                If specified, applies a causal mask as mask (optional)
-                and ignores attn_mask for computing scaled dot product
-                attention.
             n_steps: int
                 the number of prediction steps if not using teacher
                 forcing
@@ -794,10 +817,6 @@ class Transformer(SequenceModule):
                 spaces". "predicted spaces" includes the shifted initial
                 inputs. This is useful to save a concatenation during
                 the data bootstrapping phase.
-            pad_pos_skip: bool
-                if true, will skip over masked tokens when applying
-                positional encodings based on the pad mask. True values
-                in the mask will be skipped.
             temperature: float
                 a parameter to adjust the entropy of the
                 token sampling. high temperature means high entropy
@@ -808,7 +827,10 @@ class Transformer(SequenceModule):
                 computations. See huggingface documentation for more
                 details
         Returns:
-            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S+NSteps)
+                "logits": torch FloatTensor (B,S+NSteps,NTokens)
+                "past_key_values": None or tuple of tuple of tensors
         """
         n_loops = n_steps + 1
         if inpts is None:
@@ -945,6 +967,8 @@ class HFTransformer(SequenceModule):
                    mask:torch.Tensor=None,
                    pad_mask:torch.Tensor=None,
                    inputs_embeds:torch.Tensor=None,
+                   past_key_values=None,
+                   use_cache=False,
                    *args, **kwargs):
         """
         Arguments:
@@ -955,8 +979,15 @@ class HFTransformer(SequenceModule):
                 true means padding
             inputs_embeds: tensor (B,S,E)
                 optionally argue embeddings instead of token ids
+            past_key_values: tuple of tuple of tensors
+                the output of a huggingface cache. used to speed up
+                computations. See huggingface documentation for more
+                details
         Returns:
-            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S)
+                "logits": torch FloatTensor (B,S,N)
+                "past_key_values": None or tuple of tuple of tensors
         """
         # flipped so that true means attend to
         attn_mask = ~(pad_mask.bool())
@@ -967,6 +998,8 @@ class HFTransformer(SequenceModule):
             inpts,
             attention_mask=attn_mask,
             inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            past_key_values=past_key_values,
         )
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
@@ -975,7 +1008,8 @@ class HFTransformer(SequenceModule):
         else: logits = output.logits
         return {
             "logits":logits,
-            "pred_ids":torch.argmax(logits,dim=-1)
+            "pred_ids":torch.argmax(logits,dim=-1),
+            "past_key_values": getattr(output, "past_key_values", None),
         }
 
     def freedom_fwd(self,
@@ -983,7 +1017,7 @@ class HFTransformer(SequenceModule):
                     mask:torch.Tensor=None,
                     pad_mask:torch.Tensor=None,
                     is_causal:bool=None,
-                    n_steps:int=10,
+                    n_steps:int=1,
                     incl_all_inpts:bool=False,
                     pad_pos_skip:bool=False,
                     temperature=None,
@@ -1024,7 +1058,10 @@ class HFTransformer(SequenceModule):
                 computations. See huggingface documentation for more
                 details
         Returns:
-            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S+NSteps)
+                "logits": torch FloatTensor (B,S+NSteps,NTokens)
+                "past_key_values": None or tuple of tuple of tensors
         """
         n_loops = n_steps + 1
         if inpts is None:
@@ -1354,18 +1391,23 @@ class LossWrapper(torch.nn.Module):
             out_pad_mask = out_pad_mask==bos_id
         else: out_pad_mask = data["output_pad_mask"].clone()
 
-        # TODO: figure out more modular way to do this. We do this
-        # because for this task, we need some seed input for the
-        # model to begin predicting from. Also for LSTMs,
-        # the training seems to be more robust without teacher forcing.
-        inpts = data["input_ids"]
-        if not tforce or type(self.model)==LSTM:
-            leading_pad = torch.max(torch.argmax(
-                (~inpt_pad_mask).long(), dim=1
-            ))
-            inpts = inpts[:,:leading_pad+3]
+        if "input_ids" in data:
+            # TODO: figure out more modular way to do this. We do this
+            # because for this task, we need some seed input for the
+            # model to begin predicting from. Also for LSTMs,
+            # the training seems to be more robust without teacher forcing.
+            inpts = data["input_ids"]
+            if not tforce or type(self.model)==LSTM:
+                leading_pad = torch.max(torch.argmax(
+                    (~inpt_pad_mask).long(), dim=1
+                ))
+                inpts = inpts[:,:leading_pad+3]
+            tot_len = data["output_ids"].shape[-1]-inpts.shape[-1]
+        elif "inputs" in data:
+            inpts = data["inputs"]
+            tot_len = inpts.shape[1]
+        outputs = data["output_ids"]
 
-        tot_len = data["output_ids"].shape[-1]-inpts.shape[-1]
         ret_dict = self.model(
             inpts,
             pad_mask=inpt_pad_mask,
@@ -1376,14 +1418,13 @@ class LossWrapper(torch.nn.Module):
 
         ## Loss
         #################################
-        out_ids = data["output_ids"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
         logits = ret_dict["logits"]
         ps = logits.reshape(
             -1, logits.shape[-1]
         )[inpt_mask]
-        labels = out_ids.reshape(-1)[out_mask]
+        labels = outputs.reshape(-1)[out_mask]
         try:
             loss = self.loss_scale*self.loss_fxn(
                 ps,labels,
@@ -1396,8 +1437,8 @@ class LossWrapper(torch.nn.Module):
             )
             assert False
         if not reduce_metrics:
-            temp = torch.zeros_like(out_ids).float()
-            temp[out_mask.reshape(out_ids.shape)] = loss
+            temp = torch.zeros_like(outputs).float()
+            temp[out_mask.reshape(outputs.shape)] = loss
             loss = temp
         else:
             loss = loss.mean()
@@ -1414,13 +1455,13 @@ class LossWrapper(torch.nn.Module):
         acc = (pred_ids==labels).float()
         if reduce_metrics: acc = acc.mean()
         else: 
-            temp = torch.zeros_like(out_ids).float()
-            temp[out_mask.reshape(out_ids.shape)] = acc.long()
+            temp = torch.zeros_like(outputs).float()
+            temp[out_mask.reshape(outputs.shape)] = acc.long()
             acc = temp
         ret_dict["acc"] = acc
 
         ret_dict["top_k"] = top_k_acc(
-            logits, out_ids, top_k, as_tensor=True
+            logits, outputs, top_k, as_tensor=True
         )
         return ret_dict
     

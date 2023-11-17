@@ -11,6 +11,7 @@ from dl_utils.datas import get_datasets
 from dl_utils.utils import package_versions
 from dl_utils.seq_models import make_model
 from dl_utils.schedulers import DecayScheduler
+from dl_utils.training import config_error_catching
 
 """
 To use this script, move it one level above the dl_utils directory.
@@ -82,9 +83,12 @@ def train(rank, config, verbose=True, *args, **kwargs):
     #######################################
     if rank==0 and verbose and torch.cuda.device_count()>1:
         print("Handling multiple GPUs")
-    accelerator = accelerate.Accelerator()
-    model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
-    val_loader = accelerator.prepare(val_loader)
+    if config["use_accelerate"]:
+        accelerator = accelerate.Accelerator()
+        model, optimizer, train_loader = accelerator.prepare(
+            model, optimizer, train_loader
+        )
+        val_loader = accelerator.prepare(val_loader)
 
     #############################################################
     # Save Configuration
@@ -129,7 +133,10 @@ def train(rank, config, verbose=True, *args, **kwargs):
             loss = package["loss"]
             acc = package["acc"]
 
-            accelerator.backward(loss)
+            if config["use_accelerate"]:
+                accelerator.backward(loss)
+            else:
+                loss.backward()
 
             avg_acc += acc.item()
             avg_loss += loss.item()
@@ -313,14 +320,6 @@ def save_training_log(config, logstr, fname="training_log.txt", reset=False):
     mode = "w" if reset else "a"
     with open(os.path.join(config["save_folder"], fname),mode) as f:
         f.write(logstr)
-
-def config_error_catching(config):
-    """
-    This function just makes sure that some obvious hyperparameter
-    choices are set and some obviously wrong hyperparameter settings
-    are changed to what the experimenter meant.
-    """
-    return config
 
 if __name__=="__main__":
     config = { }

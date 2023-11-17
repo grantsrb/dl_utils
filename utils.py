@@ -227,8 +227,12 @@ def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
         arr = np.pad(arr, pad_tups, constant_values=fill_val)
     elif type(arr)==type(torch.zeros(1)):
         pad_tup = [0 for _ in range(2*len(arr.shape))]
-        pad_tup[2*dim+int(side=="right")] = n_pad
-        arr = np.pad(arr, tuple(pad_tup), value=fill_val)
+        # PyTorch decided to make things complicated by reversing the
+        # order that the tuple refers to
+        pad_tup[-2*(dim+1)+int(side=="right")] = n_pad
+        arr = torch.nn.functional.pad(
+            arr, tuple(pad_tup), value=fill_val
+        )
     return arr
 
 def generate_square_subsequent_mask(sz: int):
@@ -392,3 +396,48 @@ def get_git_revision_hash():
             ['git', 'rev-parse', 'HEAD']
         ).decode('ascii').strip()
 
+
+if __name__=="__main__":
+    print("Numpy")
+    x = np.ones((3,))
+    print("X:", x.shape)
+    for xx in x:
+        print(xx)
+
+    px = pad_to(x, 5, dim=0)
+    print("Padded dim 0:", px.shape)
+    for xx in px:
+        print(xx)
+    print()
+    px = pad_to(x, 5, dim=-1)
+    print("Padded dim -1:", px.shape)
+    for xx in px:
+        print(xx)
+    print()
+    #px = pad_to(x, 5, side="left", dim=2)
+    #print("Padded left dim 2:", px.shape)
+    #for xx in px:
+    #    print(xx)
+
+    print()
+    print("Torch:")
+    x = torch.ones((3,))
+    print("X:")
+    for xx in x:
+        print(xx)
+    px = pad_to(x, 5, dim=0)
+    print("Padded dim 0:", px.shape)
+    for xx in px:
+        print(xx)
+    print()
+
+    px = pad_to(x, 5, dim=-1)
+    print("Padded dim -1:", px.shape)
+    for xx in px:
+        print(xx)
+    print()
+
+    px = pad_to(x, 5, side="left", dim=2)
+    print("Padded left dim 2:", px.shape)
+    for xx in px:
+        print(xx)

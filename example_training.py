@@ -6,14 +6,16 @@ import os
 import sys
 import accelerate
 
-from save_io import save_checkpt, load_json_or_yaml
-from datas import get_datasets
-from training import record_session
-from utils import package_versions
-from seq_models import make_model
-from schedulers import DecayScheduler
+from dl_utils.save_io import save_checkpt, load_json_or_yaml
+from dl_utils.datas import get_datasets
+from dl_utils.training import record_session
+from dl_utils.utils import package_versions
+from dl_utils.seq_models import make_model
+from dl_utils.schedulers import DecayScheduler
 
 """
+To use this script, move it one level above the dl_utils directory.
+
 This script runs a toy sequence training to ensure that your model
 classes are working. The sequence is a starting number that can take
 k possible forms, a string of N ordered digits ranging somewhere between

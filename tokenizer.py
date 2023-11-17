@@ -301,6 +301,10 @@ class Tokenizer():
         self.word2id = word2id
         self.id2word = id2word
 
+    @property
+    def n_tokens(self):
+        return len(self.word2id)
+
     def train(self,
               X=None,
               tok_X=[],

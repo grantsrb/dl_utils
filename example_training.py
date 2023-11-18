@@ -29,7 +29,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
 
     # Hyperparameters
     config = config_error_catching(config) # Make sure we have valid config
-    config["packages"] = package_versions(globals(), verbose=verbose)
+    config["packages"] = package_versions(globals())
     config["seed"] = config.get("seed", int(time.time()))
     if config["seed"] is None: config["seed"] = int(time.time())
     torch.manual_seed(config["seed"]+rank)

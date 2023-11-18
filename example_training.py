@@ -1,4 +1,7 @@
 import torch
+import transformers # Imported for versioning
+import datasets # Imported for versioning
+
 import numpy as np
 import time
 from tqdm import tqdm
@@ -6,28 +9,27 @@ import os
 import sys
 import accelerate
 
-from dl_utils.save_io import save_checkpt, load_json_or_yaml, record_session
-from dl_utils.datas import get_datasets
+from dl_utils.save_io import (
+    save_checkpt, load_json_or_yaml, record_session, get_save_folder,
+)
 from dl_utils.utils import package_versions
-from dl_utils.seq_models import make_model
 from dl_utils.schedulers import DecayScheduler
-from dl_utils.training import config_error_catching
+import dl_utils.training
+try:
+    from models import make_model
+    from datas import get_datasets
+except:
+    from dl_utils.seq_models import make_model
+    from dl_utils.datas import get_datasets
 
-"""
-To use this script, move it one level above the dl_utils directory.
-
-This script runs a toy sequence training to ensure that your model
-classes are working. The sequence is a starting number that can take
-k possible forms, a string of N ordered digits ranging somewhere between
-1-100, and a final output of the starting number.
-"""
 
 def train(rank, config, verbose=True, *args, **kwargs):
+    verbose = verbose and rank==0
     torch.cuda.empty_cache()
 
     # Hyperparameters
     config = config_error_catching(config) # Make sure we have valid config
-    config["packages"] = package_versions()
+    config["packages"] = package_versions(globals(), verbose=verbose)
     config["seed"] = config.get("seed", int(time.time()))
     if config["seed"] is None: config["seed"] = int(time.time())
     torch.manual_seed(config["seed"]+rank)
@@ -36,23 +38,26 @@ def train(rank, config, verbose=True, *args, **kwargs):
 
     # Dataset/Tokenizer
     #######################################
-    if verbose and rank==0: print("Making Data")
+    if verbose: print("Collecting Data")
     # This function updates the config dict and returns DataSet objects
     tokenizer, train_dataset, val_dataset = get_datasets(config)
+    config["tokenizer"] = tokenizer
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        batch_size=config.get("batch_size", 128)
+        batch_size=config.get("batch_size", 128),
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         shuffle=True,
-        batch_size=config.get("batch_size", 1000)
+        batch_size=config.get("vbatch_size", 1000),
     )
-    if verbose and rank==0:
+    if verbose:
         print("Train Samples:", len(train_dataset))
         print("Val Samples:", len(val_dataset))
-        print("Using Sequence Length:", config["seq_len"])
+        print("Using Sequence Length:", config.get("seq_len",None))
+    if "inputs" in train_dataset[0]:
+        config["inpt_shape"] = train_dataset[0]["inputs"][0].shape
 
     # Model
     #######################################
@@ -62,12 +67,14 @@ def train(rank, config, verbose=True, *args, **kwargs):
         if hasattr(p, "data"):
             n_params += p.data.numel()
     config["n_params"] = n_params
-    print("NParameters:", n_params)
+    if verbose:
+        print("NParameters:", n_params)
 
     # Optimizer
     #######################################
-    if verbose and rank==0:
+    if verbose:
         print("Creating Optimizer")
+    # important to have an lr in config for the scheduler
     config["lr"] = config.get("lr", 0.001)
     optimizer = getattr(torch.optim, config.get("optim_type","Adam"))(
         model.parameters(),
@@ -77,11 +84,26 @@ def train(rank, config, verbose=True, *args, **kwargs):
 
     # Scheduler
     #######################################
-    scheduler = DecayScheduler( optimizer, **config )
+    if config.get("plateau_scheduler", False):
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+          optimizer, threshold=0.001, patience=config.get("patience",10)
+        )
+    else:
+        scheduler = DecayScheduler( optimizer, **config )
+
+    # Logging
+    #######################################
+    if verbose:
+        print("Model Type:", type(model))
+        print("Recording Session")
+    if rank==0:
+        record_session(
+            config, model, globals_dict=globals(), verbose=verbose
+        )
 
     # Distributed Wrapper
     #######################################
-    if rank==0 and verbose and torch.cuda.device_count()>1:
+    if verbose and torch.cuda.device_count()>1:
         print("Handling multiple GPUs")
     if config["use_accelerate"]:
         accelerator = accelerate.Accelerator()
@@ -89,13 +111,10 @@ def train(rank, config, verbose=True, *args, **kwargs):
             model, optimizer, train_loader
         )
         val_loader = accelerator.prepare(val_loader)
-
-    #############################################################
-    # Save Configuration
-    #############################################################
-    if config.get("save", False):
-        record_session(config, model)
-
+        device = accelerator.device
+    else:
+        device = rank
+    model.to(device)
 
     #############################################################
     # Training
@@ -104,10 +123,10 @@ def train(rank, config, verbose=True, *args, **kwargs):
     for epoch in range(n_epochs):
         epochtime = time.time()
         torch.cuda.empty_cache()
-        if rank==0 and verbose:
+        if verbose:
             print()
             s = "Beginning Epoch {} - {}".format(
-                epoch, config.get("save_folder", "No Save Folder")
+                epoch, config["save_folder"]
             )
             print(s)
             logstr = s + "\n"
@@ -153,7 +172,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 except:
                     pass
 
-            if verbose and i%10==0 and rank==0:
+            if verbose and i%10==0:
                 dec = 4
                 l = round(loss.item(), dec)
                 a = round(acc.item(), dec)
@@ -164,12 +183,38 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 print(s, end=int(len(s)/2)*" " + "\r")
 
 
-            if config.get("exp_name","deleteme")=="test" and i>=30: break
+            if config.get("exp_name","myexp")=="test" and i>=30: break
             if i>=(nloops-1): break
+            if i>0 and checkpt_mod and i%checkpt_mod==0 and rank==0:
+                if config.get("save_folder", None) is not None:
+                    dec = 5
+                    train_loss = round(avg_loss/i, dec)
+                    train_acc = round(avg_acc/i, dec)
+                    save_dict = {
+                        "mid_epoch": True,
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "train_acc":  train_acc,
+                        "val_loss": None,
+                        "val_acc":  None,
+                        "state_dict": model.state_dict(),
+                        "optim_dict": optimizer.state_dict(),
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "config": config,
+                    }
+                    ep = round(epoch+i/len(train_loader), 3)
+                    save_checkpt(
+                        save_dict=save_dict,
+                        save_folder=config["save_folder"],
+                        save_name="checkpt",
+                        epoch=ep,
+                        ext=".pt"
+                    )
         div = (i+1)
         dec = 5
         train_loss = round(avg_loss/div, dec)
         train_acc  = round(avg_acc/div, dec)
+
         if verbose:
             s = "Example Train Preds:"
             print()
@@ -227,7 +272,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
             val_loss = round(avg_loss/div, 5)
             val_acc =  round(avg_acc/div, 5)
             scheduler.step(val_loss)
-            if config.get("exp_name", "deleteme")=="test": break
+            if config["exp_name"]=="test": break
             if verbose:
                 print()
                 s = "Example Val Preds:"
@@ -265,14 +310,14 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
                 logstr += s + "\n\n\n\n"
                 print(s)
-
                 print()
                 print()
 
         ##############################################################
         #### SAVING
         ##############################################################
-        if rank==0 and epoch%val_mod==0 and config.get("save", False):
+        if rank==0 and epoch%val_mod==0 and config.get( "save", True ):
+            if config.get("save_folder", None) is not None:
                 save_dict = {
                     "mid_epoch": False,
                     "epoch":       epoch,
@@ -300,7 +345,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
         # Clean up
         keys = list(package.keys())
         for k in keys: del package[k]
-        if config.get("exp_name", "deleteme")=="test" and epoch>2: break
+        if config.get("exp_name","myexp")=="test" and epoch>2: break
     return model
 
 
@@ -320,6 +365,19 @@ def save_training_log(config, logstr, fname="training_log.txt", reset=False):
     mode = "w" if reset else "a"
     with open(os.path.join(config["save_folder"], fname),mode) as f:
         f.write(logstr)
+
+def config_error_catching(config):
+    """
+    This function just makes sure that some obvious hyperparameter
+    choices are set and some obviously wrong hyperparameter settings
+    are changed to what the experimenter meant.
+    """
+    config = dl_utils.training.config_error_catching(config)
+    config["model_folder"] = get_save_folder(config)
+    config["save_folder"] = os.path.join(
+        config["exp_folder"], config["model_folder"]
+    )
+    return config
 
 if __name__=="__main__":
     config = { }

@@ -584,6 +584,7 @@ def save_json(data, file_name):
         with open(file_name, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except (TypeError, OverflowError):
+        data = {**data}
         keys = list(data.keys())
         for k in keys:
             if not is_jsonable(data[k]):
@@ -605,7 +606,7 @@ def load_yaml(file_name):
         yam = yaml.safe_load(f)
     return yam
 
-def record_session(config, model, globals_dict=None):
+def record_session(config, model, globals_dict=None, verbose=False):
     """
     Writes important parameters to file. If 'resume_folder' is an entry
     in the config dict, then the txt file is appended to instead of being
@@ -646,7 +647,11 @@ def record_session(config, model, globals_dict=None):
     temp_hyps = dict()
     keys = list(config.keys())
     temp_hyps = {k:v for k,v in config.items()}
+    if verbose:
+        print("\nConfig:")
     for k in keys:
+        if verbose:
+            print("\t{}:".format(k), temp_hyps[k])
         if type(config[k]) == type(np.array([])):
             del temp_hyps[k]
         elif type(config[k])==np.int64:
@@ -656,3 +661,4 @@ def record_session(config, model, globals_dict=None):
     if "packages" not in temp_hyps:
         temp_hyps["packages"] = packages
     save_json(temp_hyps, os.path.join(sf,h+".json"))
+

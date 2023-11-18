@@ -1391,6 +1391,7 @@ class LossWrapper(torch.nn.Module):
             out_pad_mask = out_pad_mask==bos_id
         else: out_pad_mask = data["output_pad_mask"].clone()
 
+
         if "input_ids" in data:
             # TODO: figure out more modular way to do this. We do this
             # because for this task, we need some seed input for the
@@ -1407,6 +1408,13 @@ class LossWrapper(torch.nn.Module):
             inpts = data["inputs"]
             tot_len = inpts.shape[1]
         outputs = data["output_ids"]
+
+        device = self.model.get_device()
+        if inpts.get_device()!=self.model.get_device():
+            inpts = inpts.to(device)
+            inpt_pad_mask = inpt_pad_mask.to(device)
+            outputs = outputs.to(device)
+            out_pad_mask = out_pad_mask.to(device)
 
         ret_dict = self.model(
             inpts,

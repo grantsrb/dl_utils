@@ -633,7 +633,7 @@ def record_session(config, model, globals_dict=None, verbose=False):
         os.mkdir(sf)
     h = "config"
     mode = "a" if "resume_folder" in config else "w"
-    packages = package_versions(globals_dict=globals_dict)
+    packages = package_versions(globals_dict=globals_dict,verbose=verbose)
     with open(os.path.join(sf,h+".txt"),mode) as f:
         dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         f.write(dt_string)

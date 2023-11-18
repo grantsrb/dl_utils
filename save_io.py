@@ -452,12 +452,13 @@ def get_save_folder(hyps, incl_full_path=False):
 
     hyps: dict
         keys:
-            exp_folder: str
+            exp_folder: str or None
                 path to the experiment folder where all experiments
                 sharing the same `exp_name` are saved.
-                i.e. /home/user/all_saves/exp_name/
+                i.e. /home/user/all_saves/<exp_name>/
+                If None is argued, will use "./<exp_name>"
             exp_name: str
-                the experiment name
+                the experiment name.
             exp_num: int
                 the experiment id number
             search_keys: str
@@ -466,11 +467,14 @@ def get_save_folder(hyps, incl_full_path=False):
         if true, prepends the exp_folder to the save_folder.
     """
     if "exp_num" not in hyps:
+        hyps["exp_folder"] = hyps.get(
+          "exp_folder", os.path.join("./", hyps.get("exp_name", "myexp"))
+        )
         hyps["exp_num"] = get_new_exp_num(
             hyps["exp_folder"], hyps["exp_name"]
         )
     model_folder = "{}_{}".format( hyps["exp_name"], hyps["exp_num"] )
-    model_folder += prep_search_keys(hyps["search_keys"])
+    model_folder += prep_search_keys(hyps.get("search_keys","_"))
     if incl_full_path: 
         return os.path.join(hyps["exp_folder"], model_folder)
     return model_folder
@@ -488,8 +492,10 @@ def get_new_exp_num(exp_folder, exp_name, offset=0):
     Args:
         exp_folder: str
             path to the main experiment folder that contains the model
-            folders (should not include the experiment name as the final
-            directory)
+            folders. i.e. if the `exp_name` is "myexp" and there is
+            a folder that contains a number of model folders, then
+            exp_folder would be "/path/to/myexp/"
+            If None is argued, assumes "./<exp_name>/
         exp_name: str
             the name of the experiment
         offset: int
@@ -498,6 +504,7 @@ def get_new_exp_num(exp_folder, exp_name, offset=0):
     Returns:
         exp_num: int
     """
+    if not exp_folder: exp_folder = os.path.join("./", exp_name)
     name_splt = exp_name.split("_")
     namedex = 1
     if len(name_splt) > 1:

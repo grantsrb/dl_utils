@@ -366,7 +366,7 @@ def get_full_cross_mask(step_masks):
     ],dim=1)
     return cross_mask
 
-def package_versions(globals_dict=None):
+def package_versions(globals_dict=None, verbose=False):
     """
     Finds the versions of all packages used in this script
 
@@ -377,13 +377,15 @@ def package_versions(globals_dict=None):
     if globals_dict is None: globals_dict = globals()
     packages = dict()
     modules = list(set(sys.modules) & set(globals_dict))
-    print("Packages:")
+    if verbose:
+        print("Packages:")
     for module_name in modules:
         module = sys.modules[module_name]
         try:
             v = getattr(module, '__version__', 'unknown')
             packages[module_name] = v
-            print("\t", module_name, v)
+            if verbose:
+                print("\t", module_name, v)
         except:
             packages[module_name] = "unknown"
     return packages

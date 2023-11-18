@@ -4,10 +4,11 @@ import numpy as np
 import torch
 import time
 from collections import deque
-import dl_utils.save_io as io
 import select
 import shutil
 import torch.multiprocessing as mp
+
+import dl_utils.save_io as io
 
 def config_error_catching(config):
     """
@@ -15,6 +16,7 @@ def config_error_catching(config):
     choices are set and some obviously wrong hyperparameter settings
     are changed to what the experimenter meant.
     """
+    config["exp_name"] = config.get("exp_name", "myexp")
     config["use_accelerate"] = config.get(
         "use_accelerate", config.get("use_accelerator", True)
     )
@@ -318,7 +320,7 @@ def run_training(train_fxn):
     print("\nSearching over:")
     print("\n".join(["{}: {}".format(k,v) for k,v in ranges.items()]))
 
-    config["exp_name"] = config.get('exp_name', "myexperiment")
+    config["exp_name"] = config.get('exp_name', "myexp")
     exp_folder = config['exp_name']
     if "save_root" in config:
         config['save_root'] = os.path.expanduser(config['save_root'])

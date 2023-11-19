@@ -296,7 +296,7 @@ class Tokenizer():
             if word not in word2id:
                 tid = len(word2id)
                 word2id[word] = tid 
-                id2word[id] = word
+                id2word[tid] = word
 
         self.word2id = word2id
         self.id2word = id2word
@@ -335,7 +335,7 @@ class Tokenizer():
             if word not in self.word2id:
                 tid = len(self.word2id)
                 self.word2id[word] = tid 
-                self.id2word[id] = word
+                self.id2word[tid] = word
 
     def tokenize(self,
                  lostr,
@@ -455,14 +455,17 @@ class Tokenizer():
             strings: list of str
                 a list of the joined string values of the argued indices
         """
-        if type(ids)==int: ids = [ids]
+        if type(ids)==int: ids = [[ids]]
         elif hasattr(ids, "shape") and len(ids.shape)==1: ids = [ids]
         strings = []
         for seq in ids:
             if len(seq)>0:
-                strings.append(
-                    delimeter.join([ self.id2word[int(i)] for i in seq ])
-                )
+                s = []
+                for i in seq:
+                    if int(i) in self.id2word:
+                        s.append(self.id2word[int(i)])
+                    else: s.append(self.unk_token)
+                strings.append(delimeter.join(s))
         return strings
     
     def decode(self, ids):

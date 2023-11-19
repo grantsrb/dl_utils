@@ -1,5 +1,5 @@
 import pickle
-import dl_utils.tokenizer as tokenizer
+import dl_utils.tokenizer
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -78,11 +78,11 @@ def get_datasets(config):
         train_dataset: torch Dataset
         val_dataset: torch Dataset
     """
-    tkzr = tokenizer.Tokenizer()
-    pad_id = tkzr.pad_id
-    bos_id = tkzr.bos_id
-    eos_id = tkzr.eos_id
-    special_ids = tkzr.special_ids
+    tokenizer = dl_utils.tokenizer.Tokenizer()
+    pad_id = tokenizer.pad_id
+    bos_id = tokenizer.bos_id
+    eos_id = tokenizer.eos_id
+    special_ids = tokenizer.special_ids
     for k,v in special_ids.items(): config[k] = v
     K = config.get("K", 5)
     N = config.get("N", 10)
@@ -113,4 +113,14 @@ def get_datasets(config):
     val_samps = samples[n_train:]
     train_dataset = CausalDataset(train_samps, **special_ids)
     val_dataset =   CausalDataset(val_samps, **special_ids)
-    return tkzr, train_dataset, val_dataset
+
+    # Kinda hacky, but will help with printing example
+    ids = np.unique(samples.reshape(-1))
+    id2word = tokenizer.id2word
+    id2word = {
+        **id2word,
+        **{i:str(i) for i in ids if i not in id2word}
+    }
+    tokenizer.id2word = id2word
+    tokenizer.word2id = {v:k for k,v in tokenizer.id2word.items()}
+    return tokenizer, train_dataset, val_dataset

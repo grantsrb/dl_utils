@@ -650,7 +650,7 @@ def record_session(config, model, globals_dict=None, verbose=False):
     if verbose:
         print("\nConfig:")
     for k in keys:
-        if verbose:
+        if verbose and k!="packages":
             print("\t{}:".format(k), temp_hyps[k])
         if type(config[k]) == type(np.array([])):
             del temp_hyps[k]

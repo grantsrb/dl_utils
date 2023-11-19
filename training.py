@@ -22,6 +22,41 @@ def config_error_catching(config):
     )
     return config
 
+def empirical_batch_size(config, model, dataset):
+    """
+    Empirically finds a batch size based on cuda errors
+    """
+    #torch.cuda.OutOfMemoryError
+    config["batch_size"] = config.get("batch_size", 128)
+    config["vbatch_size"] = config.get("vbatch_size", 1000)
+    data_loader = torch.utils.data.DataLoader(
+        dataset, shuffle=True, batch_size=config["batch_size"],
+    )
+    cuda_error = True
+    while cuda_error:
+        cuda_error = False
+        try:
+            itr = iter(data_loader)
+            for _ in range(2):
+                data = next(itr)
+                package = model(
+                    data,
+                    ret_preds=True,
+                    tforce=config.get("tforce_train", True),
+                )
+                loss = package["loss"]
+                acc = package["acc"]
+
+                loss.backward()
+        except torch.cuda.OutOfMemoryError:
+            cuda_error = True
+            config["batch_size"] =  config["batch_size"]//2
+            config["vbatch_size"] = config["vbatch_size"]//2
+            data_loader = torch.utils.data.DataLoader(
+                dataset, shuffle=True, batch_size=config["batch_size"],
+            )
+    return data_loader
+
 def get_resume_checkpt(config, in_place=False, verbose=True):
     """
     This function cleans up the code to resume from a particular

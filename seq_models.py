@@ -222,6 +222,13 @@ class SequenceModule(tmods.CoreModule):
                     "logits": torch FloatTensor (B,S+NSteps,NTokens)
                 "past_key_values": None or tuple of tuple of tensors
         """
+        if pad_mask is None:
+            if inpts is not None:
+                pad_mask = torch.zeros_like(inpts).bool()
+            else:
+                pad_mask = torch.zeros(
+                    inputs_embeds.shape[:2]
+                ).bool().to( self.get_device() )
         if tforce:
             ret_dict = self.tforce_fwd(
                 inpts=inpts,
@@ -231,6 +238,7 @@ class SequenceModule(tmods.CoreModule):
                 use_cache=use_cache,
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
+                temperature=temperature,
             )
         else:
             ret_dict = self.freedom_fwd(
@@ -748,6 +756,7 @@ class Transformer(SequenceModule):
                    inputs_embeds:torch.Tensor=None,
                    past_key_values=None,
                    use_cache=False,
+                   temperature=None,
                    *args, **kwargs):
         """
         Arguments:
@@ -785,9 +794,12 @@ class Transformer(SequenceModule):
             state = output.last_hidden_state.reshape(-1,og_shape[-1])
             logits = self.decoder(state).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
+        pred_ids = self.sample_with_temperature(
+            logits, temperature
+        )
         return {
-            "logits":logits,
-            "pred_ids":torch.argmax(logits,dim=-1),
+            "logits": logits,
+            "pred_ids": pred_ids,
             "past_key_values": getattr(output,"past_key_values",None),
         }
 
@@ -969,6 +981,7 @@ class HFTransformer(SequenceModule):
                    inputs_embeds:torch.Tensor=None,
                    past_key_values=None,
                    use_cache=False,
+                   temperature=None,
                    *args, **kwargs):
         """
         Arguments:
@@ -983,6 +996,9 @@ class HFTransformer(SequenceModule):
                 the output of a huggingface cache. used to speed up
                 computations. See huggingface documentation for more
                 details
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S)
@@ -1006,10 +1022,13 @@ class HFTransformer(SequenceModule):
             state = output.last_hidden_state.reshape(-1,og_shape[-1])
             logits = self.decoder(state).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
+        pred_ids = self.sample_with_temperature(
+            logits, temperature
+        )
         return {
-            "logits":logits,
-            "pred_ids":torch.argmax(logits,dim=-1),
-            "past_key_values": getattr(output, "past_key_values", None),
+            "logits": logits,
+            "pred_ids": pred_ids,
+            "past_key_values": getattr(output,"past_key_values",None),
         }
 
     def freedom_fwd(self,

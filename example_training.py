@@ -15,12 +15,8 @@ from dl_utils.save_io import (
 from dl_utils.utils import package_versions
 from dl_utils.schedulers import DecayScheduler
 import dl_utils.training
-try:
-    from models import make_model
-    from datas import get_datasets
-except:
-    from dl_utils.seq_models import make_model
-    from dl_utils.datas import get_datasets
+from dl_utils.seq_models import make_model
+from dl_utils.datas import get_datasets
 
 
 def train(rank, config, verbose=True, *args, **kwargs):
@@ -42,16 +38,6 @@ def train(rank, config, verbose=True, *args, **kwargs):
     # This function updates the config dict and returns DataSet objects
     tokenizer, train_dataset, val_dataset = get_datasets(config)
     config["tokenizer"] = tokenizer
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        shuffle=True,
-        batch_size=config.get("batch_size", 128),
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        shuffle=True,
-        batch_size=config.get("vbatch_size", 1000),
-    )
     if verbose:
         print("Train Samples:", len(train_dataset))
         print("Val Samples:", len(val_dataset))
@@ -101,20 +87,35 @@ def train(rank, config, verbose=True, *args, **kwargs):
             config, model, globals_dict=globals(), verbose=verbose
         )
 
+    #######################################
     # Distributed Wrapper
     #######################################
     if verbose and torch.cuda.device_count()>1:
         print("Handling multiple GPUs")
+    accelerator = None
     if config["use_accelerate"]:
         accelerator = accelerate.Accelerator()
-        model, optimizer, train_loader = accelerator.prepare(
-            model, optimizer, train_loader
-        )
-        val_loader = accelerator.prepare(val_loader)
+        model, optimizer = accelerator.prepare( model, optimizer )
         device = accelerator.device
+    elif "device" in config:
+        device = config["device"]
     else:
         device = rank
     model.to(device)
+    train_loader = dl_utils.training.empirical_batch_size(
+        config, model, train_dataset
+    )
+    if verbose:
+        print("New Batch Size:", config["batch_size"])
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        shuffle=True,
+        batch_size=config["vbatch_size"],
+    )
+    if config["use_accelerate"]:
+        train_loader, val_loader = accelerator.prepare(
+            train_loader, val_loader
+        )
 
     #############################################################
     # Training
@@ -216,24 +217,32 @@ def train(rank, config, verbose=True, *args, **kwargs):
         train_acc  = round(avg_acc/div, dec)
 
         if verbose:
-            s = "Example Train Preds:"
-            print()
-            print(s)
-            logstr += s+"\n"
+            examps = "Example Train Preds:\n"
             preds = package["pred_ids"]
             targs = data["output_ids"]
+            pmask = ~data["input_pad_mask"].cpu()
+            tmask = ~data["output_pad_mask"].cpu()
             for i in range(min(3,len(preds))):
                 s = "Targ: "+", ".join(
-                    [str(t) for t in targs[i].cpu().data.tolist()]
+                    [str(t) for t in targs[i].cpu()[tmask[i]].tolist()]
                 )
-                logstr += s+"\n"
-                print(s)
+                examps += s+"\n"
                 s = "Pred: "+", ".join(
-                    [str(p) for p in preds[i].cpu().data.tolist()]
+                    [str(p) for p in preds[i].cpu()[pmask[i]].tolist()]
                 )
-                logstr += s+"\n\n"
-                print(s)
-                print()
+                examps += s+"\n"
+                if tokenizer:
+                    s = "Targ Str: "+ tokenizer.decode(
+                        targs[i].cpu()[tmask[i]]
+                    )[0]
+                    examps += s+"\n"
+                    s = "Pred Str: "+ tokenizer.decode(
+                        preds[i].cpu()[pmask[i]]
+                    )[0]
+                    examps += s+"\n"
+                examps += "\n"
+            logstr += examps
+            print(examps)
 
         #############################################################
         # Validation Loop
@@ -273,25 +282,34 @@ def train(rank, config, verbose=True, *args, **kwargs):
             val_acc =  round(avg_acc/div, 5)
             scheduler.step(val_loss)
             if config["exp_name"]=="test": break
+
             if verbose:
-                print()
-                s = "Example Val Preds:"
-                print(s)
-                logstr += s+"\n"
+                examps = "Example Val Preds:\n"
                 preds = package["pred_ids"]
                 targs = data["output_ids"]
+                pmask = ~data["input_pad_mask"].cpu()
+                tmask = ~data["output_pad_mask"].cpu()
                 for i in range(min(3,len(preds))):
                     s = "Targ: "+", ".join(
-                        [str(t) for t in targs[i].cpu().data.tolist()]
+                        [str(t) for t in targs[i].cpu()[tmask[i]].tolist()]
                     )
-                    logstr += s+"\n"
-                    print(s)
+                    examps += s+"\n"
                     s = "Pred: "+", ".join(
-                        [str(p) for p in preds[i].cpu().data.tolist()]
+                        [str(p) for p in preds[i].cpu()[pmask[i]].tolist()]
                     )
-                    logstr += s+"\n"
-                    print(s)
-                    print()
+                    examps += s+"\n"
+                    if tokenizer:
+                        s = "Targ Str: "+ tokenizer.decode(
+                            targs[i].cpu()[tmask[i]]
+                        )[0]
+                        examps += s+"\n"
+                        s = "Pred Str: "+ tokenizer.decode(
+                            preds[i].cpu()[pmask[i]]
+                        )[0]
+                        examps += s+"\n"
+                    examps += "\n"
+                logstr += examps
+                print(examps)
                 print()
                 s = "Final Stats, Epoch: {}".format(epoch)
                 print(s)

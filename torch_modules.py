@@ -92,6 +92,8 @@ class CoreModule(nn.Module):
             temperature: float or None
                 a value to increase the sampling entropy. ignored if
                 0 or None
+        Returns:
+            samples: torch Long Tensor (...,)
         """
         if not temperature: return torch.argmax(logits, dim=-1)
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )

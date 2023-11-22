@@ -394,6 +394,7 @@ class RNN(SequenceModule):
                       n_steps:int=0,
                       temperature=None,
                       inputs_embeds=None,
+                      stop_ids=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -409,11 +410,23 @@ class RNN(SequenceModule):
             inputs_embeds: None or Tensor, shape (B,S,D)
                 optionally argue the embeddings directly instead of
                 token ids.
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
         Returns:
             ret_dict: dict
                 logits: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
                 pred_ids: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
         if not inputs_embeds:
             embs = self.embeddings(inpts)
         else: embs = inputs_embeds
@@ -440,6 +453,8 @@ class RNN(SequenceModule):
             logits.append(ret_dict["logits"])
             if step<S-1: pred_ids.append(inpts[:,step+1])
             else: pred_ids.append(ret_dict["pred_ids"])
+            if stop_ids is not None and torch.isin(pred_ids[-1],stop_ids):
+                break
         return {
             "logits": torch.stack(logits, dim=1),
             "pred_ids": torch.stack(pred_ids,dim=1),
@@ -560,6 +575,7 @@ class LSTM(RNN):
                       n_steps:int=0,
                       temperature=None,
                       inputs_embeds=None,
+                      stop_ids=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -575,11 +591,23 @@ class LSTM(RNN):
             inputs_embeds: None or Tensor, shape (B,S,D)
                 optionally argue the embeddings directly instead of
                 token ids.
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
         Returns:
             ret_dict: dict
                 logits: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
                 pred_ids: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
         if not inputs_embeds:
             embs = self.embeddings(inpts)
         else: embs = inputs_embeds
@@ -606,6 +634,8 @@ class LSTM(RNN):
             logits.append(ret_dict["logits"])
             if step<S-1: pred_ids.append(inpts[:,step+1])
             else: pred_ids.append(ret_dict["pred_ids"])
+            if stop_ids is not None and torch.isin(pred_ids[-1], stop_ids):
+                break
         return {
             "logits": torch.stack(logits, dim=1),
             "pred_ids": torch.stack(pred_ids,dim=1),

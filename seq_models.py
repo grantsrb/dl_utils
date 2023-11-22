@@ -184,6 +184,7 @@ class SequenceModule(tmods.CoreModule):
                       inputs_embeds:torch.Tensor=None,
                       use_cache=False,
                       past_key_values=None,
+                      stop_ids=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -212,6 +213,11 @@ class SequenceModule(tmods.CoreModule):
                 if use_cache is true, will return saved computations
                 that can be argued on the next pass to save on
                 computational complexity
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
         Returns:
             ret_dict: dict
                 if tforce:
@@ -223,12 +229,18 @@ class SequenceModule(tmods.CoreModule):
                 "past_key_values": None or tuple of tuple of tensors
         """
         if pad_mask is None:
-            if inpts is not None:
-                pad_mask = torch.zeros_like(inpts).bool()
-            else:
-                pad_mask = torch.zeros(
-                    inputs_embeds.shape[:2]
-                ).bool().to( self.get_device() )
+            if past_key_values is None:
+                if inpts is not None:
+                    if len(inpts.shape)==2:
+                        pad_mask = torch.zeros_like(inpts).bool()
+                    else:
+                        pad_mask = torch.zeros(
+                            inpts.shape[:2], device=self.get_device()
+                        ).bool()
+                else:
+                    pad_mask = torch.zeros(
+                        inputs_embeds.shape[:2]
+                    ).bool().to( self.get_device() )
         if tforce:
             ret_dict = self.tforce_fwd(
                 inpts=inpts,
@@ -251,6 +263,7 @@ class SequenceModule(tmods.CoreModule):
                 use_cache=use_cache,
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
+                stop_ids=stop_ids,
             )
         return ret_dict
 
@@ -662,7 +675,7 @@ class Transformer(SequenceModule):
             )
             position_ids = position_ids.unsqueeze(0)
 
-        if len(attention_mask.shape)==2:
+        if attention_mask is None or len(attention_mask.shape)==2:
             # 4d mask is passed through the layers
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask, (B, S), inputs_embeds, past_kv_len
@@ -778,10 +791,14 @@ class Transformer(SequenceModule):
                 "past_key_values": None or tuple of tuple of tensors
         """
         # flipped so that true means attend to
-        attn_mask = ~(pad_mask.bool())
+        attn_mask = None
+        if pad_mask is not None:
+            attn_mask = ~(pad_mask.bool())
         if mask is not None:
-            attn_mask = padmask2attnmask(attn_mask)
-            attn_mask = attn_mask&~mask
+            if attn_mask is not None:
+                attn_mask = padmask2attnmask(attn_mask)
+                attn_mask = attn_mask&~mask
+            else: attn_mask = ~mask
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,
@@ -812,6 +829,7 @@ class Transformer(SequenceModule):
                     temperature=None,
                     inputs_embeds=None,
                     past_key_values=None,
+                    stop_ids=None,
                     *args, **kwargs):
         """
         Arguments:
@@ -838,21 +856,34 @@ class Transformer(SequenceModule):
                 the output of a huggingface cache. used to speed up
                 computations. See huggingface documentation for more
                 details
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S+NSteps)
                 "logits": torch FloatTensor (B,S+NSteps,NTokens)
                 "past_key_values": None or tuple of tuple of tensors
         """
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
         n_loops = n_steps + 1
         if inpts is None:
             B,S = inputs_embeds.shape[:2]
         else:
             B,S = inpts.shape
 
-        pad_mask = torch.nn.functional.pad(
-            ~(pad_mask.bool()), (0, n_loops), value=True
-        )
+        if pad_mask is not None:
+            pad_mask = torch.nn.functional.pad(
+                ~(pad_mask.bool()), (0, n_loops), value=True
+            )
         if mask is not None:
             mask = torch.nn.functional.pad(
                 ~(mask.bool()), (0, n_loops, 0, n_loops), value=True
@@ -886,10 +917,15 @@ class Transformer(SequenceModule):
         p_end = S
         if past_key_values is not None:
             p_end = past_key_values[0][0].shape[1]
-        attn_mask = pad_mask[:,:p_end]
+        attn_mask = None
+        if pad_mask is not None:
+            attn_mask = pad_mask[:,:p_end]
         if mask is not None:
-            attn_mask = padmask2attnmask(attn_mask)
-            attn_mask = mask[:,:p_end,:p_end]&attn_mask
+            if attn_mask is None:
+                attn_mask = mask[:,:p_end,:p_end]
+            else:
+                attn_mask = padmask2attnmask(attn_mask)
+                attn_mask = mask[:,:p_end,:p_end]&attn_mask
 
         for step in range(n_loops):
             output = self.encoder(
@@ -913,14 +949,23 @@ class Transformer(SequenceModule):
             if step < n_steps:
                 inpt_emb = None
                 inpt = pred_ids[:,S+step:S+step+1]
-                attn_mask = pad_mask[:,:p_end+step+1]
-                if mask is not None:
-                    attn_mask = padmask2attnmask(attn_mask)
-                    e = p_end+step+1
-                    attn_mask = mask[:,:e,:e]&attn_mask
+                if stop_ids is not None and torch.isin(inpt, stop_ids):
+                    logits = logits[:,:S+step+1]
+                    pred_ids = pred_ids[:,:S+step+1]
+                    break
+                if attn_mask is not None:
+                    if pad_mask is not None:
+                        attn_mask = pad_mask[:,:p_end+step+1]
+                    if mask is not None:
+                        e = p_end+step+1
+                        if pad_mask is not None:
+                            attn_mask = padmask2attnmask(attn_mask)
+                            attn_mask = mask[:,:e,:e]&attn_mask
+                        else:
+                            attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
-            "preds":  pred_ids[:,int(not incl_all_inpts):],
+            "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
         }
 
@@ -1006,10 +1051,14 @@ class HFTransformer(SequenceModule):
                 "past_key_values": None or tuple of tuple of tensors
         """
         # flipped so that true means attend to
-        attn_mask = ~(pad_mask.bool())
+        attn_mask = None
+        if pad_mask is not None:
+            attn_mask = ~(pad_mask.bool())
         if mask is not None:
-            attn_mask = padmask2attnmask(attn_mask)
-            attn_mask = attn_mask&~mask
+            if attn_mask is not None:
+                attn_mask = padmask2attnmask(attn_mask)
+                attn_mask = attn_mask&~mask
+            else: attn_mask = ~mask
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,
@@ -1042,6 +1091,7 @@ class HFTransformer(SequenceModule):
                     temperature=None,
                     inputs_embeds=None,
                     past_key_values=None,
+                    stop_ids=None,
                     *args, **kwargs):
         """
         Arguments:
@@ -1076,21 +1126,37 @@ class HFTransformer(SequenceModule):
                 the output of a huggingface cache. used to speed up
                 computations. See huggingface documentation for more
                 details
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                sequence will be the sequence including the stop id.
+                All sequences in the batch are terminated from a single
+                stop id in any sample
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S+NSteps)
                 "logits": torch FloatTensor (B,S+NSteps,NTokens)
                 "past_key_values": None or tuple of tuple of tensors
         """
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
         n_loops = n_steps + 1
         if inpts is None:
             B,S = inputs_embeds.shape[:2]
         else:
             B,S = inpts.shape
 
-        pad_mask = torch.nn.functional.pad(
-            ~(pad_mask.bool()), (0, n_loops), value=True
-        )
+        if pad_mask is None:
+            pad_mask = torch.ones(B,S+n_loops).bool().to(self.get_device())
+        else:
+            pad_mask = torch.nn.functional.pad(
+                ~(pad_mask.bool()), (0, n_loops), value=True
+            )
         if mask is not None:
             mask = torch.nn.functional.pad(
                 ~(mask.bool()), (0, n_loops, 0, n_loops), value=True
@@ -1124,10 +1190,15 @@ class HFTransformer(SequenceModule):
         p_end = S
         if past_key_values is not None:
             p_end = past_key_values[0][0].shape[1]
-        attn_mask = pad_mask[:,:p_end]
+        attn_mask = None
+        if pad_mask is not None:
+            attn_mask = pad_mask[:,:p_end]
         if mask is not None:
-            attn_mask = padmask2attnmask(attn_mask)
-            attn_mask = mask[:,:p_end,:p_end]&attn_mask
+            if attn_mask is None:
+                attn_mask = mask[:,:p_end,:p_end]
+            else:
+                attn_mask = padmask2attnmask(attn_mask)
+                attn_mask = mask[:,:p_end,:p_end]&attn_mask
 
         for step in range(n_loops):
             output = self.encoder(
@@ -1151,14 +1222,24 @@ class HFTransformer(SequenceModule):
             if step < n_steps:
                 inpt_emb = None
                 inpt = pred_ids[:,S+step:S+step+1]
-                attn_mask = pad_mask[:,:p_end+step+1]
-                if mask is not None:
-                    attn_mask = padmask2attnmask(attn_mask)
-                    e = p_end+step+1
-                    attn_mask = mask[:,:e,:e]&attn_mask
+                if stop_ids is not None and torch.isin(inpt, stop_ids):
+                    print("hey")
+                    logits = logits[:,:S+step+1]
+                    pred_ids = pred_ids[:,:S+step+1]
+                    break
+                if attn_mask is not None:
+                    if pad_mask is not None:
+                        attn_mask = pad_mask[:,:p_end+step+1]
+                    if mask is not None:
+                        e = p_end+step+1
+                        if pad_mask is not None:
+                            attn_mask = padmask2attnmask(attn_mask)
+                            attn_mask = mask[:,:e,:e]&attn_mask
+                        else:
+                            attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
-            "preds":  pred_ids[:,int(not incl_all_inpts):],
+            "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
         }
 
@@ -1350,6 +1431,7 @@ class LossWrapper(torch.nn.Module):
                 temperature=None,
                 top_k=5,
                 reduce_metrics=True,
+                seed_len=3,
                 *args, **kwargs):
         """
         Args:
@@ -1388,12 +1470,14 @@ class LossWrapper(torch.nn.Module):
                 if true, loss and acc will be averaged over all samples.
                 if false, loss and acc will be returned as tensors for
                 each token prediction
+            seed_len: int
+                the amount of seed text if using `tforce=False`
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
                 "loss": torch tensor (1,) or (B,)
                 "acc": torch tensor (1,) or (B,)
                     the raw accuracy for the non-rmb task
-                "preds": torch tensor (B,S,P)
+                "pred_ids": torch tensor (B,S,P)
                     the prediction logits. only returned if ret_preds is
                     true
         """
@@ -1401,6 +1485,7 @@ class LossWrapper(torch.nn.Module):
         pad_id = self.pad_id
         bos_id = self.bos_id
         eos_id = self.eos_id
+        if seed_len is None or seed_len<0: seed_len = 0
         if "input_pad_mask" not in data:
             inpt_pad_mask = (data["input_ids"]==pad_id)
             inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_id)
@@ -1421,7 +1506,7 @@ class LossWrapper(torch.nn.Module):
                 leading_pad = torch.max(torch.argmax(
                     (~inpt_pad_mask).long(), dim=1
                 ))
-                inpts = inpts[:,:leading_pad+3]
+                inpts = inpts[:,:leading_pad+int(seed_len)]
             tot_len = data["output_ids"].shape[-1]-inpts.shape[-1]
         elif "inputs" in data:
             inpts = data["inputs"]

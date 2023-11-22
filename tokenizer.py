@@ -388,7 +388,7 @@ class Tokenizer():
                     add_bos=True,
                     add_eos=True,
                     as_tensor=True,
-                    verbose=True):
+                    verbose=False):
         """
         Used to convert tokens to ids
 
@@ -429,7 +429,8 @@ class Tokenizer():
                 try:
                     ids[i].append(self.word2id[t])
                 except:
-                    print(f"Key error using {t}")
+                    if verbose:
+                        print(f"Tokenizer key error using {t}")
                     ids[i].append(self.unk_id)
             if add_eos and len(ids[i])<seq_len:
                 ids[i].append(self.eos_id)

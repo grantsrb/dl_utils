@@ -417,15 +417,15 @@ class Tokenizer():
             X: list of lists of ids | torch long tensor (N,seq_len)
         """
         if seq_len is None: seq_len = np.inf
+        assert seq_len>=int(add_eos)+int(add_bos)+1
         ids = []
         for i,samp in enumerate(toks):
             ids.append([])
             if add_bos: ids[i].append(self.bos_id)
             for j,t in enumerate(samp):
-                if j==seq_len-2 and add_eos:
+                if j==seq_len-1 and add_eos:
                     ids[i].append(self.eos_id)
                     break
-                elif j==seq_len-1: break
                 try:
                     ids[i].append(self.word2id[t])
                 except:

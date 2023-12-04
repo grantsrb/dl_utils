@@ -299,9 +299,8 @@ class RNN(SequenceModule):
         if self.l_norm:
             modules.append(torch.nn.LayerNorm(d_hid))
         modules.append(torch.nn.Dropout(self.drop_p))
-        modules.append(torch.nn.Linear( d_hid, self.out_tokens ))
-                       
         self.decoder = torch.nn.Sequential( *modules )
+        self.lm_head = torch.nn.Linear( d_hid, self.out_tokens )
 
     def get_fresh_recurrent_vectors(self, batch_size=1):
         """
@@ -387,7 +386,7 @@ class RNN(SequenceModule):
                     h = self.layer_norms[l](h)
                 inpt = h
                 new_hs[l][idx] = h
-            logits[idx] = self.decoder(inpt)
+            logits[idx] = self.lm_head(self.decoder(inpt))
             pred_ids[idx] = self.sample_with_temperature(
                 logits[idx], temperature
             )
@@ -579,7 +578,7 @@ class LSTM(RNN):
                 inpt = h
                 new_hs[l][idx] = h
                 new_cs[l][idx] = c
-            logits[idx] = self.decoder(inpt)
+            logits[idx] = self.lm_head(self.decoder(inpt))
             pred_ids[idx] = self.sample_with_temperature(
                 logits[idx], temperature
             )
@@ -672,10 +671,8 @@ class Transformer(SequenceModule):
         self.layers = torch.nn.ModuleList([])
         for _ in range(self.n_layers):
             self.layers.append(LlamaDecoderLayer( config ))
-        self.decoder = nn.Sequential(
-            nn.LayerNorm(self.d_model),
-            nn.Linear(self.d_model, self.n_tokens)
-        )
+        self.decoder = nn.LayerNorm(self.d_model)
+        self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
 
     def get_prep_tensors(self,
@@ -859,7 +856,9 @@ class Transformer(SequenceModule):
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
             state = output.last_hidden_state.reshape(-1,og_shape[-1])
-            logits = self.decoder(state).reshape(*og_shape[:-1], -1)
+            logits = self.lm_head(
+                self.decoder(state)
+            ).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
         pred_ids = self.sample_with_temperature(
             logits, temperature
@@ -989,7 +988,7 @@ class Transformer(SequenceModule):
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
                 state = output.last_hidden_state[:,-1]
-                pred = self.decoder(state)
+                pred = self.lm_head(self.decoder(state))
             else: pred = output.logits[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
             argmaxs = self.sample_with_temperature(
@@ -1059,14 +1058,15 @@ class HFTransformer(SequenceModule):
             self.encoder.set_input_embeddings(None)
             self.embeddings = None
 
+        self.decoder = nn.LayerNorm(self.d_model)
         if hasattr(self.encoder, "lm_head"):
             if self.n_tokens and self.n_tokens==self.out_tokens:
-                self.decoder = self.encoder.lm_head
+                self.lm_head = self.encoder.lm_head
             else:
-                self.decoder =  nn.Linear( self.d_model, self.out_tokens )
-            self.encoder.lm_head = self.decoder
+                self.lm_head =  nn.Linear( self.d_model, self.out_tokens )
+            self.encoder.lm_head = self.lm_head
         else:
-            self.decoder =  nn.Linear( self.d_model, self.out_tokens )
+            self.lm_head =  nn.Linear( self.d_model, self.out_tokens )
         self.init_weights()
 
     def tforce_fwd(self,
@@ -1119,7 +1119,9 @@ class HFTransformer(SequenceModule):
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
             state = output.last_hidden_state.reshape(-1,og_shape[-1])
-            logits = self.decoder(state).reshape(*og_shape[:-1], -1)
+            logits = self.lm_head(
+                self.decoder(state)
+            ).reshape(*og_shape[:-1], -1)
         else: logits = output.logits
         pred_ids = self.sample_with_temperature(
             logits, temperature
@@ -1262,7 +1264,7 @@ class HFTransformer(SequenceModule):
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
                 states = output.last_hidden_state[:,-1]
-                pred = self.decoder(states)
+                pred = self.lm_head(self.decoder(states))
             else: pred = output.logits[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
             argmaxs = self.sample_with_temperature(

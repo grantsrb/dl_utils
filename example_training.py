@@ -266,7 +266,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
                         temperature=config.get(
                             "sampling_temperature", None
                         ),
-                        seed_len=config.get("seed_len", 3),
+                        sprout_len=config.get("sprout_len", 3),
                     )
                     loss = package["loss"]
                     acc = package["acc"]

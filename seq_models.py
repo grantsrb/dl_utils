@@ -1019,8 +1019,6 @@ class Transformer(SequenceModule):
         }
 
 
-
-
 class HFTransformer(SequenceModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1275,7 +1273,6 @@ class HFTransformer(SequenceModule):
                 inpt_emb = None
                 inpt = pred_ids[:,S+step:S+step+1]
                 if stop_ids is not None and torch.isin(inpt, stop_ids):
-                    print("hey")
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]
                     break
@@ -1483,7 +1480,7 @@ class LossWrapper(torch.nn.Module):
                 temperature=None,
                 top_k=5,
                 reduce_metrics=True,
-                seed_len=3,
+                sprout_len=3,
                 *args, **kwargs):
         """
         Args:
@@ -1522,7 +1519,7 @@ class LossWrapper(torch.nn.Module):
                 if true, loss and acc will be averaged over all samples.
                 if false, loss and acc will be returned as tensors for
                 each token prediction
-            seed_len: int
+            sprout_len: int
                 the amount of seed text if using `tforce=False`
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
@@ -1537,7 +1534,7 @@ class LossWrapper(torch.nn.Module):
         pad_id = self.pad_id
         bos_id = self.bos_id
         eos_id = self.eos_id
-        if seed_len is None or seed_len<0: seed_len = 0
+        if sprout_len is None or sprout_len<0: sprout_len = 0
         if "input_pad_mask" not in data:
             inpt_pad_mask = (data["input_ids"]==pad_id)
             inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_id)
@@ -1558,7 +1555,7 @@ class LossWrapper(torch.nn.Module):
                 leading_pad = torch.max(torch.argmax(
                     (~inpt_pad_mask).long(), dim=1
                 ))
-                inpts = inpts[:,:leading_pad+int(seed_len)]
+                inpts = inpts[:,:leading_pad+int(sprout_len)]
             tot_len = data["output_ids"].shape[-1]-inpts.shape[-1]
         elif "inputs" in data:
             inpts = data["inputs"]

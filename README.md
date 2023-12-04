@@ -28,7 +28,10 @@ necessary packages locally:
 python3 -m pip install --user -r requirements.txt
 ```
 
+## Config Arguments
 
+- `sprout_len`: int
+    - the length of the seed text in sequence models when not using teacher forcing
 
 
 

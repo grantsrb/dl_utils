@@ -38,6 +38,7 @@ class SequenceModule(tmods.CoreModule):
                 n_heads:int=4,
                 h_mult:int=4,
                 h_norm:bool=False,
+                l_norm:bool=False,
                 n_layers:int=3,
                 norm_first:bool=True,
                 drop_p:float=0.5,
@@ -67,6 +68,8 @@ class SequenceModule(tmods.CoreModule):
             feed forward networks in the model.
         h_norm: bool
             if true, will use a layer norm on the lstm hidden state
+        l_norm: bool
+            if true, will include layer norms where appropriate
         n_layers: int
             the number of transformer layers
         norm_first: bool
@@ -110,6 +113,7 @@ class SequenceModule(tmods.CoreModule):
         self.n_heads = n_heads
         self.h_mult = h_mult
         self.h_norm = h_norm
+        self.l_norm = l_norm
         self.n_layers = n_layers
         self.drop_p = drop_p
         self.norm_first = norm_first
@@ -277,13 +281,14 @@ class RNN(SequenceModule):
             self.embeddings = torch.nn.Embedding(
                 self.n_tokens, self.d_model
             )
-        self.pre_norm = torch.nn.LayerNorm(self.d_model)
+        if self.l_norm:
+            self.pre_norm = torch.nn.LayerNorm(self.d_model)
         self.rnns = torch.nn.ModuleList([])
-        self.layer_norms = torch.nn.ModuleList([])
-        self.h_norms = torch.nn.ModuleList([])
+        if self.l_norm or self.h_norm:
+            self.layer_norms = torch.nn.ModuleList([])
         for i in range(self.n_layers):
-            self.layer_norms.append( torch.nn.LayerNorm(self.d_model) )
-            self.h_norms.append( torch.nn.LayerNorm(self.d_model) )
+            if self.l_norm or self.h_norm:
+                self.layer_norms.append(torch.nn.LayerNorm(self.d_model))
             self.rnns.append(
                 self.rnn_type(self.d_model, self.d_model)
             )
@@ -291,7 +296,8 @@ class RNN(SequenceModule):
         modules = []
         modules.append(torch.nn.Linear( self.d_model, d_hid ))
         modules.append(torch.nn.GELU())
-        modules.append(torch.nn.LayerNorm(d_hid))
+        if self.l_norm:
+            modules.append(torch.nn.LayerNorm(d_hid))
         modules.append(torch.nn.Dropout(self.drop_p))
         modules.append(torch.nn.Linear( d_hid, self.out_tokens ))
                        
@@ -369,15 +375,17 @@ class RNN(SequenceModule):
         else: inpt = inputs_embeds[idx]
         
         new_hs = [ h.clone() for h in hs ]
-        inpt = self.pre_norm(inpt)
+        if self.l_norm:
+            inpt = self.pre_norm(inpt)
         if len(inpt)>0:
-            # Loop through lstm layers of model
-            z = zip(self.rnns, self.layer_norms, self.h_norms)
-            for l,(rnn, norm, h_norm) in enumerate(z):
+            # Loop through rnn layers of model
+            for l in range(len(self.rnns)):
+                rnn = self.rnns[l]
                 h = hs[l][idx]
-                if self.h_norm: h = h_norm(h)
                 h = rnn(inpt, h)
-                inpt = norm(h)
+                if self.h_norm or self.l_norm:
+                    h = self.layer_norms[l](h)
+                inpt = h
                 new_hs[l][idx] = h
             logits[idx] = self.decoder(inpt)
             pred_ids[idx] = self.sample_with_temperature(
@@ -460,6 +468,17 @@ class RNN(SequenceModule):
             "pred_ids": torch.stack(pred_ids,dim=1),
             "hs": hs
         }
+
+class LinearRNN(SequenceModule):
+    def __init__(self, rnn_type="RNNCell", *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        d_hid = self.d_model*4
+        modules = []
+        modules.append(torch.nn.Linear( self.d_model, d_hid ))
+        if self.l_norm:
+            modules.append(torch.nn.LayerNorm(d_hid))
+        modules.append(torch.nn.Linear( d_hid, self.out_tokens ))
+        self.decoder = torch.nn.Sequential( *modules )
 
 class GRU(RNN):
     def __init__(self, rnn_type="GRUCell", *args, **kwargs):
@@ -551,12 +570,13 @@ class LSTM(RNN):
         inpt = self.pre_norm(inpt)
         if len(inpt)>0:
             # Loop through lstm layers of model
-            z = zip(self.lstms, self.layer_norms, self.h_norms)
-            for l,(lstm, norm, h_norm) in enumerate(z):
+            for l in range(len(self.lstms)):
+                lstm = self.lstms[l]
                 h,c = (hs[l][idx], cs[l][idx])
-                if self.h_norm: h = h_norm(h)
                 h,c = lstm(inpt, (h,c))
-                inpt = norm(h)
+                if self.h_norm or self.l_norm:
+                    h = self.layer_norms[l](h)
+                inpt = h
                 new_hs[l][idx] = h
                 new_cs[l][idx] = c
             logits[idx] = self.decoder(inpt)

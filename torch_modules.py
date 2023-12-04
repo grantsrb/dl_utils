@@ -97,7 +97,10 @@ class CoreModule(nn.Module):
         """
         if not temperature: return torch.argmax(logits, dim=-1)
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
-        return torch.multinomial(ps, num_samples=1)[...,0]
+        og_shape = ps.shape
+        ps = ps.reshape(-1, ps.shape[-1])
+        samp = torch.multinomial(ps, num_samples=1)[...,0]
+        return samp.reshape(og_shape[:-1])
 
 
 class Flatten(nn.Module):

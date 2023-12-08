@@ -55,6 +55,8 @@ def empirical_batch_size(config, model, dataset):
             data_loader = torch.utils.data.DataLoader(
                 dataset, shuffle=True, batch_size=config["batch_size"],
             )
+        except StopIteration:
+            pass
     return data_loader
 
 def get_resume_checkpt(config, in_place=False, verbose=True):

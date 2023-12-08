@@ -458,8 +458,7 @@ class RNN(SequenceModule):
             )
             hs = ret_dict["hs"]
             logits.append(ret_dict["logits"])
-            if step<S-1: pred_ids.append(inpts[:,step+1])
-            else: pred_ids.append(ret_dict["pred_ids"])
+            pred_ids.append(ret_dict["pred_ids"])
             if stop_ids is not None and torch.isin(pred_ids[-1],stop_ids):
                 break
         return {
@@ -651,8 +650,7 @@ class LSTM(RNN):
             )
             hs,cs = ret_dict["hs"], ret_dict["cs"]
             logits.append(ret_dict["logits"])
-            if step<S-1: pred_ids.append(inpts[:,step+1])
-            else: pred_ids.append(ret_dict["pred_ids"])
+            pred_ids.append(ret_dict["pred_ids"])
             if stop_ids is not None and torch.isin(pred_ids[-1], stop_ids):
                 break
         return {
@@ -1004,8 +1002,8 @@ class Transformer(SequenceModule):
             argmaxs = self.sample_with_temperature(
                 pred, temperature
             ).squeeze()
-            pred_ids[:,S+step] = argmaxs
-            if step < n_steps:
+            pred_ids[:,S+step+int(incl_all_inpts)] = argmaxs
+            if step < n_loops-1:
                 inpt_emb = None
                 inpt = pred_ids[:,S+step:S+step+1]
                 if stop_ids is not None and torch.isin(inpt, stop_ids):
@@ -1279,7 +1277,7 @@ class HFTransformer(SequenceModule):
             argmaxs = self.sample_with_temperature(
                 pred, temperature
             ).squeeze()
-            pred_ids[:,S+step] = argmaxs
+            pred_ids[:,S+step+incl_all_inpts] = argmaxs
             if step < n_steps:
                 inpt_emb = None
                 inpt = pred_ids[:,S+step:S+step+1]
@@ -1299,6 +1297,7 @@ class HFTransformer(SequenceModule):
                             attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
+            # pred ids are shifted whereas logits are not
             "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
         }
@@ -1557,20 +1556,16 @@ class LossWrapper(torch.nn.Module):
 
 
         if "input_ids" in data:
-            # TODO: figure out more modular way to do this. We do this
-            # because for this task, we need some seed input for the
-            # model to begin predicting from. Also for LSTMs,
-            # the training seems to be more robust without teacher forcing.
             inpts = data["input_ids"]
-            if not tforce or type(self.model)==LSTM:
+            if not tforce or type(self.model) in {LSTM,GRU,RNN,LinearRNN}:
                 leading_pad = torch.max(torch.argmax(
                     (~inpt_pad_mask).long(), dim=1
                 ))
                 inpts = inpts[:,:leading_pad+int(sprout_len)]
-            tot_len = data["output_ids"].shape[-1]-inpts.shape[-1]
+            n_steps = inpt_pad_mask.shape[-1]-inpts.shape[-1]
         elif "inputs" in data:
             inpts = data["inputs"]
-            tot_len = inpts.shape[1]
+            n_steps = inpts.shape[1]
         outputs = data["output_ids"]
 
         device = self.model.get_device()
@@ -1584,15 +1579,22 @@ class LossWrapper(torch.nn.Module):
             inpts,
             pad_mask=inpt_pad_mask,
             tforce=tforce,
-            n_steps=tot_len,
+            n_steps=n_steps,
             temperature=temperature,
         )
 
         ## Loss
         #################################
+        logits = ret_dict["logits"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
-        logits = ret_dict["logits"]
+        #print("n_steps:", n_steps)
+        #print("inpts:", inpts.shape)
+        #print("logits:", logits.shape)
+        #print("inpt-logit diff:", logits.shape[1]-inpts.shape[1])
+        #print("outputs:", outputs.shape)
+        #print("inpt_mask:", inpt_mask.shape)
+        #print("out_mask:", out_mask.shape)
         ps = logits.reshape(
             -1, logits.shape[-1]
         )[inpt_mask]
@@ -1633,7 +1635,7 @@ class LossWrapper(torch.nn.Module):
         ret_dict["acc"] = acc
 
         ret_dict["top_k"] = top_k_acc(
-            logits, outputs, top_k, as_tensor=True
+            ps, labels, top_k, as_tensor=True
         )
         return ret_dict
 
@@ -1688,6 +1690,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    model = globals()[config.get("model_type","HFTransformer")](**config)
+    model = globals()[config.get("model_type","Transformer")](**config)
+    #model = globals()[config.get("model_type","GRU")](**config)
     return LossWrapper(model=model, config=config, **config)
 

@@ -315,7 +315,7 @@ def get_causal_cross_mask(step_masks):
     for smask in step_masks:
         smask[smask<0] = torch.max(smask)+1
     shape = [*step_masks[0].shape, step_masks[1].shape[-1]]
-    cross_mask = torch.zeros(shape)
+    cross_mask = torch.zeros(shape).to(step_masks[0].get_device())
     cross_mask = cross_mask + step_masks[0][..., None]
     cross_mask = cross_mask - step_masks[1][:,None]
     cross_mask[cross_mask<=0] = -1
@@ -339,19 +339,18 @@ def get_full_cross_mask(step_masks):
             multi-modal time step of the individual mode.
     Returns:
         cross_mask: bool tensor (B,S1+S2,S1+S2)
-            a causal cross attention mask. true values mean non-attended
-            locations. Does not allow modality x to attend to current
-            timestep of modality y and visa-versa.
+            a causal cross attention mask. true values mean padding,
+            non-attended locations. Does not allow modality x to
+            attend to current timestep of modality y and visa-versa.
     """
     # TODO: Allow longer sequence to attend to shorter sequence at
     #   current global timestep and allow shorter sequence to attend
     #   to first substep of longer sequence at current timestep
+    device = step_masks[0].get_device()
+    if device<0: device = "cpu"
     cross_mask1 = get_causal_cross_mask(step_masks)
-    mode1_mask = get_causal_mask(step_masks[0].shape[-1])
-    mode2_mask = get_causal_mask(step_masks[1].shape[-1])
-    print("Cross:", cross_mask1.shape)
-    print("mode1:", mode1_mask.shape)
-    print("mode2:", mode2_mask.shape)
+    mode1_mask = get_causal_mask(step_masks[0].shape[-1]).to(device)
+    mode2_mask = get_causal_mask(step_masks[1].shape[-1]).to(device)
     cross_mask2 = torch.flip(torch.rot90(
         cross_mask1,k=1,dims=(1,2)
     ),dims=(-1,))

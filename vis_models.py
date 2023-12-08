@@ -10,7 +10,7 @@ class VisionModule(tmods.CoreModule):
     def __init__(self,
                  inpt_shape,
                  outp_size,
-                 bnorm=False,
+                 bnorm=True,
                  lnorm=False,
                  drop_p=0,
                  actv_fxn="ReLU",
@@ -281,7 +281,7 @@ class ResLikeCNN(VisionModule):
             self.in_conv.append(nn.LayerNorm(depths[1]))
         self.in_conv.append(nn.GELU())
         self.in_conv = nn.Sequential(*self.in_conv)
-        
+
         self.blocks = nn.ModuleList([])
         depths.append(depths[-1])
         for i, n_layers in enumerate(layer_counts):
@@ -291,7 +291,8 @@ class ResLikeCNN(VisionModule):
                 depths[i+2],
                 n_layers,
                 stride=2 if i!=0 else 1,
-                noise=noise
+                noise=noise,
+                bnorm=self.bnorm,
             ))
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.flat_size = self.depths[-1]

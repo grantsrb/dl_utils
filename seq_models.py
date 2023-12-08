@@ -178,7 +178,7 @@ class SequenceModule(tmods.CoreModule):
         config.update(config_kwargs)
         return config
 
-    def forward(self, inpts:torch.Tensor,
+    def forward(self, inpts:torch.Tensor=None,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
@@ -817,6 +817,7 @@ class Transformer(SequenceModule):
                    past_key_values=None,
                    use_cache=False,
                    temperature=None,
+                   hidden_states_only=False,
                    *args, **kwargs):
         """
         Arguments:
@@ -831,6 +832,8 @@ class Transformer(SequenceModule):
                 the output of a huggingface cache. used to speed up
                 computations. See huggingface documentation for more
                 details
+            hidden_states_only: bool
+                if true, will not bother computing the logits
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S)
@@ -853,6 +856,12 @@ class Transformer(SequenceModule):
             use_cache=use_cache,
             past_key_values=past_key_values,
         )
+        if hidden_states_only:
+            return {
+                "last_hidden_state": output.last_hidden_state,
+                "past_key_values": getattr(output,"past_key_values",None),
+                "logits": getattr(output,"logits",None),
+            }
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
             state = output.last_hidden_state.reshape(-1,og_shape[-1])
@@ -864,6 +873,7 @@ class Transformer(SequenceModule):
             logits, temperature
         )
         return {
+            "last_hidden_state": output.last_hidden_state,
             "logits": logits,
             "pred_ids": pred_ids,
             "past_key_values": getattr(output,"past_key_values",None),
@@ -884,7 +894,7 @@ class Transformer(SequenceModule):
         Arguments:
             inpts: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
-                true means unattended locations
+                true means padding, or unattended locations
             pad_mask: Tensor, shape ``[bsize, seq_len]``
                 true means padding
             n_steps: int
@@ -1125,6 +1135,7 @@ class HFTransformer(SequenceModule):
             logits, temperature
         )
         return {
+            "last_hidden_state": output.last_hidden_state,
             "logits": logits,
             "pred_ids": pred_ids,
             "past_key_values": getattr(output,"past_key_values",None),
@@ -1625,7 +1636,7 @@ class LossWrapper(torch.nn.Module):
             logits, outputs, top_k, as_tensor=True
         )
         return ret_dict
-    
+
     def print_data(self, data, inpt_pad_mask, out_pad_mask):
         if not self.tokenizer: self.tokenizer = EmptyTokenizer()
         for i in range(len(data["input_ids"])):

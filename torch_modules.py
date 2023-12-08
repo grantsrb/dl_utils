@@ -352,7 +352,7 @@ class GenerativeLSTM(nn.Module):
 class CrossAttention(nn.Module):
     """
     Builds off the pytorch multihead attention module to combine multiple
-    different modalities symettrcially into a single multi-head attention.
+    different modalities symetrically into a single multi-head attention.
     """
     def __init__(self,
                  embed_dim,
@@ -542,6 +542,74 @@ class CrossAttention(nn.Module):
         if need_weights:
             return attn_out, attn_weights
         return attn_out
+
+class CrossAttentionPrep(nn.Module):
+    """
+    This module preps the incoming sequence to be used by a standard
+    transformer by applying modality specific embeddings and building
+    the cross-modal attention mask.
+    """
+    def __init__(self,
+                 embed_dim,
+                 num_modes=2,
+                 dtype=None,
+                 *args, **kwargs) -> None:
+        """
+        Args:
+            embed_dim: int
+                Total dimension of the model.
+            num_modes: int
+                the number of modalities to be combined into the
+                self-attention.
+            device: int or str
+            dtype: str
+        """
+        super().__init__(*args, **kwargs)
+        self.num_modes = num_modes
+        self.mode_encodings = nn.Parameter(
+            0.01*torch.randn(self.num_modes, embed_dim)
+        )
+        torch.nn.init.kaiming_uniform_(
+            self.mode_encodings,
+            mode='fan_in',
+            nonlinearity='leaky_relu'
+        )
+
+    def forward(self,
+                inpt_list,
+                pad_masks=None,
+                step_masks=None,
+                *args, **kwargs):
+        """
+        Args:
+            inpt_list: list of torch FloatTensors [(B,S1,E), (B,S2,E)]
+                a list of the embedding/latent vectors.
+            pad_masks: list of torch BoolTensors [(B,S1), (B,S2)]
+                A list of the pad masks. A True value indicates that
+                the corresponding key value will be ignored for the
+                purpose of attention. True means padding.
+            step_masks: list of torch LongTensors [(B,S1), (B,S2)]
+                One entry for each modality. Currently only 2 modalities
+                are supported. It should be a list of masks denoting
+                step of the information relative to the other modalities.
+                This allows you to use causal masking based on the step
+                of an environment instead of the step of each embedding,
+                preventing attention to positions that are at a future
+                state of the environment. B is the batch size, S1 is
+                the sequence length of the first modality and S2 is the
+                sequence length of the 2nd modality. Only Long type masks
+                are supported.
+        """
+        inpt_list = [
+          inpt+self.mode_encodings[i] for i,inpt in enumerate(inpt_list)
+        ]
+        inpts = torch.cat(inpt_list, dim=1) # (B,S1+S2,E)
+        # cross mask assumes true is padding
+        cross_mask = get_full_cross_mask(step_masks) # (B,S1+S2,S1+S2)
+        pad_mask = torch.cat(pad_masks, dim=-1)# (B,S1+S2)
+        pad_mask = padmask2attnmask(pad_mask) # (B,S1+S2,S1+S2)
+        attn_mask = cross_mask|pad_mask
+        return inpts, attn_mask
 
 class FlexibleLlamaModel(LlamaModel):
     """

@@ -22,9 +22,17 @@ def config_error_catching(config):
     )
     return config
 
-def empirical_batch_size(config, model, dataset):
+def empirical_batch_size(config, model, dataset, reduction_factor=0.5):
     """
-    Empirically finds a batch size based on cuda errors
+    Empirically finds a batch size based on cuda errors. Updates the
+    config with a new batch size and a new n_grad_loops.
+
+    Args:
+        config: dict
+        model: torch Module
+        dataset: torch Dataset
+        reduction_factor: float in interval (0,1)
+            the factor to reduce the batch size by.
     """
     #torch.cuda.OutOfMemoryError
     config["batch_size"] = config.get("batch_size", 128)
@@ -50,8 +58,10 @@ def empirical_batch_size(config, model, dataset):
                 loss.backward()
         except torch.cuda.OutOfMemoryError:
             cuda_error = True
-            config["batch_size"] =  config["batch_size"]//2
-            config["vbatch_size"] = config["vbatch_size"]//2
+            factor = reduction_factor
+            config["batch_size"] =  int(factor*config["batch_size"])
+            config["vbatch_size"] = int(factor*config["vbatch_size"])
+            #config["n_grad_loops"] = max(config["n_grad_loops"]*div, 8)
             data_loader = torch.utils.data.DataLoader(
                 dataset, shuffle=True, batch_size=config["batch_size"],
             )

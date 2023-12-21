@@ -235,16 +235,50 @@ def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
         )
     return arr
 
-def generate_square_subsequent_mask(sz: int):
+def get_causal_mask_like(inpt: torch.Tensor):
     """
     Generates an upper-triangular matrix of True, with Falses on
-    diag and lower triangle.
+    diag and lower triangle like the argued inpt. Thus, this
+    generates a causal mask where True denotes the unattended tokens.
 
+    Args:
+        inpt: tensor (B,S) or (B,S,E)
+    Returns:
+        BoolTensor (1, inpt.shape[1],inpt.shape[1])
+    """
+    mask = generate_square_subsequent_mask(inpt.shape[1])
+    device = inpt.get_device()
+    if device<0: device = "cpu"
+    return mask.to(device)[None]
+
+def generate_square_subsequent_mask(
+        sz: int,
+        device=torch.device(torch._C._get_default_device()),
+        dtype="bool"):
+    """
+    Generates an upper-triangular matrix of True, with Falses on
+    diag and lower triangle. Thus, False represents attended indices.
+
+    Args:
+        sz: int
+            the size of the square mask
+        device: int or str or None
+        dtype: str ("bool" or "float")
     Returns:
         BoolTensor (sz,sz)
     """
-    #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
-    return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
+    if dtype=="float" or dtype==float:
+        mask = torch.triu(
+            torch.full(
+                (sz, sz),
+                float('-inf'),
+                device=device
+            ).float(),
+            diagonal=1,
+        )
+    else:
+        mask = torch.triu(torch.ones(sz, sz), diagonal=1).bool()
+    return mask.to(device)
 
 
 def arglast(mask, dim=None, axis=-1):
@@ -274,12 +308,23 @@ def padmask2attnmask(pad_mask):
     of the row vectors with themselves. The result allows you to
     combine masks with more flexibility.
 
+    IMPORTANT!!!!!!!! The mask must be made such that true values
+        denote non-padding, i.e. do-attend-to tokens. Be very
+            careful here! This function will not work if the mask is
+            inverted.
+
     Args:
         pad_mask: Tensor (B,S)
+            true values denote non-padding, false is padding. Be very
+            careful here! This function will not work if the mask is
+            inverted.
     Returns:
         attn_mask: Tensor (B,S,S)
     """
-    return torch.einsum("bs,bj->bsj", pad_mask, pad_mask)
+    B,S = pad_mask.shape
+    reps = (1,S,1)
+    return pad_mask[:,None].repeat(reps)
+    #return torch.einsum("bs,bj->bsj", pad_mask, pad_mask)
 
 def get_causal_mask(sz: int):
     """
@@ -312,10 +357,12 @@ def get_causal_cross_mask(step_masks):
             of the list is determined by the number of elements
             in `seq_lens`
     """
+    device = step_masks[0].get_device()
+    if device<0: device = "cpu"
     for smask in step_masks:
         smask[smask<0] = torch.max(smask)+1
     shape = [*step_masks[0].shape, step_masks[1].shape[-1]]
-    cross_mask = torch.zeros(shape).to(step_masks[0].get_device())
+    cross_mask = torch.zeros(shape).to(device)
     cross_mask = cross_mask + step_masks[0][..., None]
     cross_mask = cross_mask - step_masks[1][:,None]
     cross_mask[cross_mask<=0] = -1
@@ -399,46 +446,14 @@ def get_git_revision_hash():
 
 
 if __name__=="__main__":
-    print("Numpy")
-    x = np.ones((3,))
-    print("X:", x.shape)
-    for xx in x:
-        print(xx)
+    step1 = torch.arange(5).long()
+    step2 = []
+    for i in range(5):
+        step2.append(i)
+        step2.append(i)
+        if torch.rand(1)>0.5: step2.append(i)
+    step2 = torch.LongTensor(step2)
+    print("Step1:\n", step1)
+    print("Step2:\n", step2)
 
-    px = pad_to(x, 5, dim=0)
-    print("Padded dim 0:", px.shape)
-    for xx in px:
-        print(xx)
-    print()
-    px = pad_to(x, 5, dim=-1)
-    print("Padded dim -1:", px.shape)
-    for xx in px:
-        print(xx)
-    print()
-    #px = pad_to(x, 5, side="left", dim=2)
-    #print("Padded left dim 2:", px.shape)
-    #for xx in px:
-    #    print(xx)
-
-    print()
-    print("Torch:")
-    x = torch.ones((3,))
-    print("X:")
-    for xx in x:
-        print(xx)
-    px = pad_to(x, 5, dim=0)
-    print("Padded dim 0:", px.shape)
-    for xx in px:
-        print(xx)
-    print()
-
-    px = pad_to(x, 5, dim=-1)
-    print("Padded dim -1:", px.shape)
-    for xx in px:
-        print(xx)
-    print()
-
-    px = pad_to(x, 5, side="left", dim=2)
-    print("Padded left dim 2:", px.shape)
-    for xx in px:
-        print(xx)
+    print(get_full_cross_mask([step1[None],step2[None]]).long())

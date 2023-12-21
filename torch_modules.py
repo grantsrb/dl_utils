@@ -265,7 +265,7 @@ class NullOp(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
 
-    def forward(self, x):
+    def forward(self, x, *args, **kwargs):
         return x
 
 class ContainedLSTM(nn.Module):
@@ -348,6 +348,12 @@ class GenerativeLSTM(nn.Module):
             h, c = self.lstm(x, (h,c))
             outpts.append(h)
         return torch.stack(outpts, dim=1)
+
+class MultiheadAttention(nn.Module):
+    """
+
+    """
+    pass
 
 class CrossAttention(nn.Module):
     """
@@ -579,6 +585,7 @@ class CrossAttentionPrep(nn.Module):
                 inpt_list,
                 pad_masks=None,
                 step_masks=None,
+                n_steps=None,
                 *args, **kwargs):
         """
         Args:
@@ -600,16 +607,30 @@ class CrossAttentionPrep(nn.Module):
                 sequence length of the 2nd modality. Only Long type masks
                 are supported.
         """
-        inpt_list = [
-          inpt+self.mode_encodings[i] for i,inpt in enumerate(inpt_list)
-        ]
+        ## TODO: QUESTION DECISION FOR MODE ENCODINGS. Cannot use freedom
+        ## forward if using mode encodings with current setup.
+        #inpt_list = [
+        #  inpt+self.mode_encodings[i] for i,inpt in enumerate(inpt_list)
+        #]
+
         inpts = torch.cat(inpt_list, dim=1) # (B,S1+S2,E)
+
         # cross mask assumes true is padding
+        # TODO: Need to be careful about step mask because we don't know
+        # when the environment steps when we're predicting a multi-step
+        # chunk of text, and this influences whether the text sees
+        # the appropriate vision inputs.
+        if n_steps and n_steps>0:
+            step_masks[1] = torch.nn.functional.pad(
+                step_masks[1],
+                (0,n_steps, 0,n_steps),
+                value=torch.max(step_masks[1])+1
+            )
         cross_mask = get_full_cross_mask(step_masks) # (B,S1+S2,S1+S2)
         pad_mask = torch.cat(pad_masks, dim=-1)# (B,S1+S2)
-        pad_mask = padmask2attnmask(pad_mask) # (B,S1+S2,S1+S2)
-        attn_mask = cross_mask|pad_mask
-        return inpts, attn_mask
+        #pad_mask = padmask2attnmask(pad_mask) # (B,S1+S2,S1+S2)
+        #attn_mask = cross_mask|pad_mask
+        return inpts, cross_mask, pad_mask
 
 class FlexibleLlamaModel(LlamaModel):
     """

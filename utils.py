@@ -8,6 +8,10 @@ try:
 except:
     pass
 
+def device_fxn(device):
+    if device<0: return "cpu"
+    return device
+
 def try_key(d, key, val):
     """
     d: dict
@@ -234,6 +238,73 @@ def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
             arr, tuple(pad_tup), value=fill_val
         )
     return arr
+
+def num2base(n, b):
+    """
+    Converts a number to a new base returning a string.
+    (Taken from Stack Overflow)
+
+    Args:
+        n: int
+            the number that is currently in base 10 that you would
+            like to convert to another base b
+        b: int
+            the new number base
+    Returns:
+        numerals: list of ints
+            the numerals of the argued number in the new base
+    """
+
+    if n == 0:
+        return [0]
+    numerals = []
+    while n:
+        numerals.append(int(n % b))
+        n //= b
+    return numerals[::-1]
+
+def get_one_hot(ids, L):
+    """
+    Args:
+        ids: torch long tensor (..., N)
+        L: int
+            the length of the one-hot vector
+    Returns:
+        one_hots: torch long tensor (..., N, L)
+    """
+    shape = [*ids.shape, L]
+    device = ids.get_device()
+    if device<0: device = "cpu"
+    one_hots = torch.zeros( shape, device=device )
+    one_hots.scatter_(
+        dim=-1,
+        index=ids[...,None],
+        src=torch.ones_like(one_hots)
+    )
+    return one_hots
+
+def get_mask_past_id(src, id_):
+    """
+    Returns a mask in which ones denote all spaces after the first
+    occurance of the argued `id_`
+
+    Args:
+        src: long tensor  (B,S)
+        id_: int
+    Returns:
+        mask: bool tensor (B,S)
+            true values denote indexes past the first occurance of the `id_` along
+            the last dimension
+    """
+    B,S = src.shape
+    is_id = (src==id_).long()
+    id_idxs = torch.argmax(is_id, dim=-1)
+    # if id_ does not appear, then default idx is past last idx
+    id_idxs[torch.sum(is_id,dim=-1)==0] = src.shape[-1]
+    arange = torch.arange(S)[None].repeat((B,1)).long()
+    mask = arange.to(DEVICES[id_idxs.get_device()])>id_idxs[:,None]
+    return mask
+
 
 def get_causal_mask_like(inpt: torch.Tensor):
     """

@@ -7,7 +7,7 @@ import numpy as np
 import dl_utils.torch_modules as tmods
 from .utils import (
     generate_square_subsequent_mask, arglast, top_k_acc,
-    update_shape, padmask2attnmask,
+    update_shape, padmask2attnmask, get_causal_mask_like,
 )
 import math
 
@@ -52,6 +52,7 @@ class SequenceModule(tmods.CoreModule):
                 hf_model_type:str="llama",
                 pretrained:bool=False,
                 init_range:float=0.1,
+                seq_len:int=2048,
                 *args, **kwargs):
         """
         n_tokens: int
@@ -129,10 +130,15 @@ class SequenceModule(tmods.CoreModule):
         self.reorder_and_upcast = reorder_and_upcast
         self.pretrained = pretrained
         self.init_range = init_range
+        self.seq_len = seq_len
 
     def init_weights(self, init_range=0.1) -> None:
-        print("Weight initialization currently not implemented")
         pass
+        #initrange = 0.1
+        #if hasattr(self, "embeddings"):
+        #    self.embeddings.weight.data.uniform_(-initrange, initrange)
+        #self.lm_head.bias.data.zero_()
+        #self.lm_head.weight.data.uniform_(-initrange, initrange)
 
     def get_config(self):
         """
@@ -166,6 +172,7 @@ class SequenceModule(tmods.CoreModule):
             "torch_dtype": "float32",
             "reorder_and_upcast_attn": self.reorder_and_upcast,
             "add_cross_attention": False,
+            "max_position_embeddings": max(2048, self.seq_len),
         }
         if self.hf_model_type=="gpt2":
             config = GPT2Config()
@@ -233,7 +240,7 @@ class SequenceModule(tmods.CoreModule):
                 "past_key_values": None or tuple of tuple of tensors
         """
         if pad_mask is None:
-            if past_key_values is None:
+            if past_key_values is None or past_key_values[0] is None:
                 if inpts is not None:
                     if len(inpts.shape)==2:
                         pad_mask = torch.zeros_like(inpts).bool()
@@ -245,6 +252,22 @@ class SequenceModule(tmods.CoreModule):
                     pad_mask = torch.zeros(
                         inputs_embeds.shape[:2]
                     ).bool().to( self.get_device() )
+
+        #### TODO: DELETME
+        if mask is None:
+            if inpts is None:
+                S = inputs_embeds.shape[1]
+            else:
+                S = inpts.shape[1]
+            if past_key_values is not None:
+                S += past_key_values[0][0].shape[2]
+            if not tforce:
+                S += n_steps
+            mask = generate_square_subsequent_mask(S)[None]
+            mask = mask.to(self.get_device())
+        ###pad_mask = None
+        ### TODO: END DELETE
+
         if tforce:
             ret_dict = self.tforce_fwd(
                 inpts=inpts,
@@ -667,8 +690,11 @@ class Transformer(SequenceModule):
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         config = self.get_config()
         self.layers = torch.nn.ModuleList([])
-        for _ in range(self.n_layers):
-            self.layers.append(LlamaDecoderLayer( config ))
+        for el in range(self.n_layers):
+            try:
+                self.layers.append(LlamaDecoderLayer(config,layer_idx=el))
+            except TypeError:
+                self.layers.append(LlamaDecoderLayer(config))
         self.decoder = nn.LayerNorm(self.d_model)
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
@@ -676,6 +702,11 @@ class Transformer(SequenceModule):
     def get_prep_tensors(self,
                 inputs_embeds=None,
                 attention_mask=None,
+
+                ## TODO
+                #pad_mask=None,
+                ## TODO
+
                 past_key_values=None,
                 position_ids=None,
                 *args, **kwargs):
@@ -705,7 +736,7 @@ class Transformer(SequenceModule):
         B,S,E = inputs_embeds.shape
 
         past_kv_len = 0
-        if past_key_values is not None:
+        if past_key_values is not None and past_key_values[0] is not None:
             past_kv_len = past_key_values[0][0].shape[2]
 
         if position_ids is None:
@@ -721,17 +752,64 @@ class Transformer(SequenceModule):
             position_ids = position_ids.unsqueeze(0)
 
         if attention_mask is None or len(attention_mask.shape)==2:
-            # 4d mask is passed through the layers
             attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask, (B, S), inputs_embeds, past_kv_len
+                attention_mask=attention_mask,
+                input_shape=(B, S),
+                inputs_embeds=inputs_embeds.clone(),
+                past_key_values_length=past_kv_len,
             )
         elif len(attention_mask.shape)==3:
             attention_mask = attention_mask[:,None]
+        if attention_mask is not None:
+            #if attention_mask.dtype!=torch.bool:
+            #    attention_mask = attention_mask==0
+            if len(attention_mask.shape)==4:
+                attention_mask = attention_mask[:,:,-S:]
+            if attention_mask.dtype==torch.bool:
+                new_mask = torch.zeros_like(attention_mask).float()
+                new_mask.masked_fill_(~attention_mask, -1e33)
+                attention_mask = new_mask
+
+        #print("Amask:", attention_mask.shape, attention_mask.dtype)
+        #print("early Amask:", attention_mask[0,:10,:10])
+        #print("Laste Amask:", attention_mask[0,-10:,-10:])
+
+        ## TODO
+        #if pad_mask is not None:
+        #    comp_mask = _prepare_4d_causal_attention_mask(
+        #        attention_mask=pad_mask,
+        #        input_shape=(B, S),
+        #        inputs_embeds=inputs_embeds.clone(),
+        #        past_key_values_length=past_kv_len,
+        #    )
+        #    print("pre comp_mask", comp_mask.shape)
+        #    print("pre attn_mask", attention_mask.shape)
+        #    print("pre comp:",comp_mask[0,0])
+        #    if comp_mask.dtype!=torch.bool:
+        #        comp_mask = (comp_mask==0)
+        #    if len(attention_mask.shape)==4:
+        #        comp_mask = comp_mask[:,:,-S:]
+        #    equal = comp_mask!=attention_mask
+        #    print("tot sum:", equal.float().sum())
+        #    print("row sum:", equal.reshape(len(equal),-1).float().sum(1))
+        #    print("comp_mask", comp_mask.shape)
+        #    print("attn_mask", attention_mask.shape)
+        #    print("comp:",comp_mask[0,0,0])
+        #    print("attn:",attention_mask[0,0,0])
+        #    if past_key_values is not None:
+        #        assert False
+        ## TODO
+
         return position_ids, attention_mask
 
     def encoder(self,
                 input_ids=None,
                 attention_mask=None,
+
+                #TODO
+                pad_mask=None,
+                #TODO
+
                 use_cache=False,
                 past_key_values=None,
                 inputs_embeds=None,
@@ -744,7 +822,7 @@ class Transformer(SequenceModule):
                 the input ids. one of this or inputs_embeds must be not
                 None
             attention_mask: Tensor, shape (B,S,S) or (B,S)
-                true values mean non-masked and attended to indices.
+                true values mean non-masked, do attend to indices.
                 NOTE: This is flipped from the other functions!!!!
             use_cache: bool
                 if true, will return the updated past_key_values for
@@ -768,24 +846,110 @@ class Transformer(SequenceModule):
             inputs_embeds = self.embeddings(input_ids)
         hidden_states = inputs_embeds
 
+        #if attention_mask is not None:
+        #    print("PREP ATTENTION, ", attention_mask.dtype)
+        #    print(attention_mask.shape)
+        #    if len(attention_mask.shape)==3:
+        #        a = attention_mask[0].long()
+        #    else:
+        #        a = attention_mask.long()
+        #    print("attn first 10:")
+        #    for i in range(min(a.shape[0], 5)):
+        #        print(a[i,:10].tolist())
+        #    print(a[-1,:10].tolist())
+        #    print()
+
+        #    print("attn last 10:")
+        #    print(a[0,-10:].tolist())
+        #    for i in reversed(range(1,min(a.shape[0], 6))):
+        #        print(a[-i,-10:].tolist())
+        #    print()
+        #    print()
+
         position_ids, attn_mask = self.get_prep_tensors(
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
+
+            ## TODO
+            #pad_mask=pad_mask,
+            ## TODO
+
+
             position_ids=position_ids,
         )
+        
+
+        #print("POST,", attn_mask.dtype)
+        #print("Shape", attn_mask.shape)
+        #a = attn_mask[0,0].long()
+        #print("attn lines:")
+        #for i in range(a.shape[0]):
+        #    print(i,a[i,:25].tolist()+a[i,-25:].tolist())
+        #print()
+        #assert False
+
+        #print("attn last 10:")
+        #print(a[0,-10:].tolist())
+        #for i in reversed(range(1,min(a.shape[0], 6))):
+        #    print(a[-i,-10:].tolist())
+        #print()
+        #print()
+
+        #print("attn:", attn_mask.shape)
+        #if (a==0).float().sum()>0 and (a<0).float().sum()==0:
+        #    assert False
 
         all_hidden_states = []
         attn_weights = []
         next_cache = []
+        S = 0
         for i,layer in enumerate(self.layers):
             if past_key_values is not None:
+                # past_key_values: layer, k or v, precomputed values
                 past_key_value = past_key_values[i]
+
+                # Need to get the correct entry in the attn mask if
+                # we argued a custom attention mask. This is actually
+                # the last row in the attn_mask, but we can do it
+                # this way to maintain compatibility with non-custom
+                # attn_masks
+                if attn_mask is not None:
+                    if attn_mask.shape[2]!=hidden_states.shape[1]:
+                        # past_key_value: B, NHeads, S, D/NHeads
+                        S = past_key_value[0].shape[2]
             else:
                 past_key_value = None
+            if attn_mask is not None:
+                amask = attn_mask[:,:,S:S+hidden_states.shape[1]]
+
+                #if amask.shape[0]!=hidden_states.shape[0]:
+                #    s = [1 for _ in range(len(amask.shape)-1)]
+                #    amask = amask.repeat(
+                #        tuple([hidden_states.shape[0]]+s)
+                #    )
+
+            else: amask = None
+
+            #if use_cache and amask is not None:
+            #    if amask.dtype==torch.bool:
+            #        new_mask = torch.zeros_like(amask).float()
+            #        new_mask.masked_fill_(~amask, -math.inf)
+            #        amask = new_mask
+            #### TODO: 
+            #if i==0:
+            #    if amask is not None:
+            #        print("Amask:", amask.shape, amask.dtype)
+            #        print("early Amask:", amask[0,:5,:5])
+            #        print("Laste Amask:", amask[0,-5:,-5:])
+            #    else:
+            #        print("asmask is none")
+            #    if past_key_values is not None:
+            #        assert False
+
             output = layer(
                 hidden_states=hidden_states,
-                attention_mask=attn_mask,
+                attention_mask=amask,
                 position_ids=position_ids,
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
@@ -845,11 +1009,16 @@ class Transformer(SequenceModule):
         if mask is not None:
             if attn_mask is not None:
                 attn_mask = padmask2attnmask(attn_mask)
-                attn_mask = attn_mask&~mask
-            else: attn_mask = ~mask
+                attn_mask = attn_mask&~(mask.bool())
+            else: attn_mask = ~(mask.bool())
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,
+
+            ##TODO
+            #pad_mask=~pad_mask.bool(),
+            ##TODO
+
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             past_key_values=past_key_values,
@@ -923,7 +1092,10 @@ class Transformer(SequenceModule):
                 "pred_ids": torch LongTensor (B,S+NSteps)
                 "logits": torch FloatTensor (B,S+NSteps,NTokens)
                 "past_key_values": None or tuple of tuple of tensors
+                "last_hidden_state": torch FloatTensor (B,S+NSteps,E)
         """
+        n_loops = n_steps + 1
+
         if stop_ids is not None:
             if type(stop_ids)==int: stop_ids = [stop_ids]
             if len(stop_ids)>0:
@@ -931,22 +1103,14 @@ class Transformer(SequenceModule):
                 stop_ids = stop_ids.to(self.get_device())
             else: stop_ids = None
         else: stop_ids = None
-        n_loops = n_steps + 1
+
         if inpts is None:
             B,S = inputs_embeds.shape[:2]
         else:
             B,S = inpts.shape
 
-        if pad_mask is not None:
-            pad_mask = torch.nn.functional.pad(
-                ~(pad_mask.bool()), (0, n_loops), value=True
-            )
-        if mask is not None:
-            mask = torch.nn.functional.pad(
-                ~(mask.bool()), (0, n_loops, 0, n_loops), value=True
-            )
         pred_ids = torch.zeros(
-            (B,S+n_loops), device=self.get_device()
+            (B,S+n_loops+int(incl_all_inpts)), device=self.get_device()
         ).long()
         if inpts is not None:
             pred_ids[:,:S] = inpts
@@ -954,11 +1118,12 @@ class Transformer(SequenceModule):
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=self.get_device()
         )
-        logits[:,:S-1+incl_all_inpts].scatter_(
-            dim=-1,
-            index=inpts[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
-        )
+        if inpts is not None:
+            logits[:,:S-1+incl_all_inpts].scatter_(
+                dim=-1,
+                index=inpts[:, 1-incl_all_inpts:S, None],
+                src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            )
 
         # Need to ensure we use the appropriate input type between
         # the inpts ids and the input embeddings
@@ -969,33 +1134,67 @@ class Transformer(SequenceModule):
             inpt = pred_ids[:,:S]
             inpt_emb = None
 
+        # Masks
+        if pad_mask is not None:
+            pad_mask = ~(pad_mask.bool())
+            if pad_mask.shape[-1]<S+n_loops:
+                p = S+n_loops - pad_mask.shape[-1]
+                pad_mask = torch.nn.functional.pad(
+                    pad_mask, (0, p), value=True
+                )
+        # Custom attention mask
+        if mask is not None:
+            mask = ~(mask.bool())
+            if mask.shape[-1]<S+n_steps:
+                p = S+n_steps - mask.shape[-1]
+                mask = torch.nn.functional.pad(
+                    mask, (0, p, 0, p), value=True
+                )
+            # if pad_mask is not None:
+            #     pad_mask = padmask2attnmask(pad_mask)
         # Need to ensure the padding mask is the full length of the
         # past_key_values if past_key_values is not none
         p_end = S
-        if past_key_values is not None:
+        if past_key_values is not None and past_key_values[0] is not None:
+            # pkv idxs: layer, k or v, values
             p_end = past_key_values[0][0].shape[1]
-        attn_mask = None
-        if pad_mask is not None:
-            attn_mask = pad_mask[:,:p_end]
-        if mask is not None:
-            if attn_mask is None:
-                attn_mask = mask[:,:p_end,:p_end]
-            else:
-                attn_mask = padmask2attnmask(attn_mask)
-                attn_mask = mask[:,:p_end,:p_end]&attn_mask
+
+        h_states = []
 
         for step in range(n_loops):
+            ## The masks are inverted at this point, 1 means do attend
+            attn_mask = None
+            if pad_mask is not None:
+                e = p_end+step
+                attn_mask = pad_mask[:,:e]
+            if mask is not None:
+                e = p_end+step
+                if attn_mask is not None:
+                    attn_mask = mask[:,:e,:e]&padmask2attnmask(attn_mask)
+                else:
+                    attn_mask = mask[:,:e,:e]
+
             output = self.encoder(
                 input_ids=inpt,
                 attention_mask=attn_mask,
                 use_cache=True,
                 past_key_values=past_key_values,
                 inputs_embeds=inpt_emb,
+
+                ##TODO
+                #pad_mask=pad_mask.bool()[:,:e],
+                ##TODO
+
             )
             past_key_values = output.past_key_values
+
+            if len(h_states)==0:
+                h_states.append(output.last_hidden_state)
+            else:
+                h_states.append(output.last_hidden_state[:,-1:])
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
-                state = output.last_hidden_state[:,-1]
+                state = h_states[-1][:,-1]
                 pred = self.lm_head(self.decoder(state))
             else: pred = output.logits[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
@@ -1010,20 +1209,11 @@ class Transformer(SequenceModule):
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]
                     break
-                if attn_mask is not None:
-                    if pad_mask is not None:
-                        attn_mask = pad_mask[:,:p_end+step+1]
-                    if mask is not None:
-                        e = p_end+step+1
-                        if pad_mask is not None:
-                            attn_mask = padmask2attnmask(attn_mask)
-                            attn_mask = mask[:,:e,:e]&attn_mask
-                        else:
-                            attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
             "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
+            "last_hidden_state": torch.cat(h_states, dim=1),
         }
 
 
@@ -1111,10 +1301,13 @@ class HFTransformer(SequenceModule):
         if pad_mask is not None:
             attn_mask = ~(pad_mask.bool())
         if mask is not None:
+            raise NotImplemented
             if attn_mask is not None:
+                # be careful with padmask2attnmask function. make sure
+                # mask values are false for padding.
                 attn_mask = padmask2attnmask(attn_mask)
                 attn_mask = attn_mask&~mask
-            else: attn_mask = ~mask
+            else: attn_mask = ~mask.bool()
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,
@@ -1204,6 +1397,7 @@ class HFTransformer(SequenceModule):
                 stop_ids = stop_ids.to(self.get_device())
             else: stop_ids = None
         else: stop_ids = None
+
         n_loops = n_steps + 1
         if inpts is None:
             B,S = inputs_embeds.shape[:2]
@@ -1217,6 +1411,7 @@ class HFTransformer(SequenceModule):
                 ~(pad_mask.bool()), (0, n_loops), value=True
             )
         if mask is not None:
+            raise NotImplemented
             mask = torch.nn.functional.pad(
                 ~(mask.bool()), (0, n_loops, 0, n_loops), value=True
             )
@@ -1229,11 +1424,12 @@ class HFTransformer(SequenceModule):
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=self.get_device()
         )
-        logits[:,:S-1+incl_all_inpts].scatter_(
-            dim=-1,
-            index=inpts[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
-        )
+        if inpts is not None:
+            logits[:,:S-1+incl_all_inpts].scatter_(
+                dim=-1,
+                index=inpts[:, 1-incl_all_inpts:S, None],
+                src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            )
 
         # Need to ensure we use the appropriate input type between
         # the inpts ids and the input embeddings
@@ -1247,19 +1443,23 @@ class HFTransformer(SequenceModule):
         # Need to ensure the padding mask is the full length of the
         # past_key_values if past_key_values is not none
         p_end = S
-        if past_key_values is not None:
+        if past_key_values is not None and past_key_values[0] is not None:
             p_end = past_key_values[0][0].shape[1]
-        attn_mask = None
-        if pad_mask is not None:
-            attn_mask = pad_mask[:,:p_end]
-        if mask is not None:
-            if attn_mask is None:
-                attn_mask = mask[:,:p_end,:p_end]
-            else:
-                attn_mask = padmask2attnmask(attn_mask)
-                attn_mask = mask[:,:p_end,:p_end]&attn_mask
 
+        h_states = []
         for step in range(n_loops):
+            attn_mask = None
+            e = p_end+step
+            if pad_mask is not None:
+                attn_mask = pad_mask[:,:e]
+            if mask is not None:
+                if attn_mask is None:
+                    attn_mask = mask[:,:e,:e]
+                else:
+                    attn_mask = padmask2attnmask(attn_mask)
+                    attn_mask = mask[:,:e,:e]&attn_mask
+                    if past_key_values is not None:
+                        attn_mask = attn_mask[:,-1:]
             output = self.encoder(
                 input_ids=inpt,
                 attention_mask=attn_mask,
@@ -1268,6 +1468,10 @@ class HFTransformer(SequenceModule):
                 inputs_embeds=inpt_emb,
             )
             past_key_values = output.past_key_values
+            if len(h_states)==0:
+                h_states.append(output.last_hidden_state)
+            else:
+                h_states.append(output.last_hidden_state[:, -1:])
             ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
                 states = output.last_hidden_state[:,-1]
@@ -1285,22 +1489,385 @@ class HFTransformer(SequenceModule):
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]
                     break
-                if attn_mask is not None:
-                    if pad_mask is not None:
-                        attn_mask = pad_mask[:,:p_end+step+1]
-                    if mask is not None:
-                        e = p_end+step+1
-                        if pad_mask is not None:
-                            attn_mask = padmask2attnmask(attn_mask)
-                            attn_mask = mask[:,:e,:e]&attn_mask
-                        else:
-                            attn_mask = mask[:,:e,:e]
+                #if attn_mask is not None:
+                #    if pad_mask is not None:
+                #        attn_mask = pad_mask[:,:p_end+step+1]
+                #    if mask is not None:
+                #        e = p_end+step+1
+                #        if pad_mask is not None:
+                #            attn_mask = padmask2attnmask(attn_mask)
+                #            attn_mask = mask[:,:e,:e]&attn_mask
+                #        else:
+                #            attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
-            # pred ids are shifted whereas logits are not
             "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
+            "last_hidden_state": torch.cat(h_states, dim=1),
         }
+
+class TorchTransformer(SequenceModule):
+    """
+    This is a vanilla transformer that uses a PyTorch backend. This
+    model has a lower chance of becoming deprecated.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        self.pos_encs = SinPositionalEncoding(
+            d_model=self.d_model,
+            max_len=2048,
+            learnable=self.learn_posencs,
+        )
+        self.layers = torch.nn.ModuleList([])
+        self.lnorms = torch.nn.ModuleList([])
+            # TODO: make custom encoder layer
+        for el in range(self.n_layers):
+            self.layers.append(torch.nn.TransformerEncoderLayer(
+                d_model=self.d_model,
+                nhead=self.n_heads,
+                dim_feedforward=self.d_model*self.h_mult,
+                dropout=self.drop_p,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            ))
+            self.lnorms.append(torch.nn.LayerNorm(self.d_model))
+        self.decoder = nn.LayerNorm(self.d_model)
+        self.lm_head = nn.Linear(self.d_model, self.n_tokens)
+        self.init_weights()
+
+    def combine_attn_masks(self,
+                sz=0,
+                attention_mask=None,
+                pad_mask=None):
+        """
+        This function manually combines attention masks because pytorch
+        does it stupidly.
+
+        Args:
+            sz: int
+            attention_mask: BoolTensor (B,S,S) or (S,S)
+                True values mean masked, do not attend to indices
+            pad_mask: BoolTensor (B,S)
+        """
+        if attention_mask is None:
+            attn_mask = generate_square_subsequent_mask(
+                sz,
+                device=self.get_device(),
+                dtype="float"
+            )
+        else:
+            if attention_mask.dtype==torch.bool:
+                attention_mask = attention_mask.float().masked_fill_(
+                    attention_mask, float("-inf"))
+            attn_mask = attention_mask
+        if pad_mask is not None:
+            pad_mask = pad_mask.float().masked_fill_(
+                pad_mask,float("-inf"))
+            S = pad_mask.shape[1]
+            attn_mask = attn_mask + pad_mask[:,None].repeat((1,S,1))
+            attn_mask[(attn_mask==0).sum(-1)==0] = 0
+        if len(attn_mask.shape)>2:
+            attn_mask = torch.repeat_interleave(
+                input=attn_mask,
+                repeats=self.n_heads,
+                dim=0,
+            )
+        return attn_mask
+
+    def encoder(self,
+                input_ids=None,
+                attention_mask=None,
+                pad_mask=None,
+                use_cache=False,
+                past_key_values=None,
+                inputs_embeds=None,
+                position_ids=None,
+                output_attentions=False,
+                *args, **kwargs):
+        """
+        Arguments:
+            input_ids: Long Tensor, shape ``[bsize, seq_len]``
+                the input ids. one of this or inputs_embeds must be not
+                None
+            attention_mask: Tensor, shape (B,S,S) or (B,S)
+                true values mean masked, not attended to indices.
+            pad_mask: Tensor, shape (B,S)
+                true values mean masked, not attended to indices.
+            use_cache: bool
+                if true, will return the updated past_key_values for
+                future speedups
+            past_key_values: list of lists of tensors
+                the cached computations returned by the layer when
+                `use_cache` is true.
+            inputs_embeds: None or torch FloatTensor (B,S,E)
+                the input embeddings. this must not be None if input_ids
+                is None. input_ids overrides this argument if both are
+                not None.
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
+            output_attentions: bool
+                if true, will return the attention weights
+        Returns:
+            BaseModelOutputWithPast
+        """
+        past_key_values = None
+        if inputs_embeds is None:
+            inputs_embeds = self.embeddings(input_ids)
+        hidden_states = inputs_embeds
+
+        attn_mask = self.combine_attn_masks(
+            sz=inputs_embeds.shape[1],
+            attention_mask=attention_mask,
+            pad_mask=pad_mask,
+        )
+        hidden_states = self.pos_encs(inputs_embeds, pids=position_ids)
+
+        past_key_value = None
+        all_hidden_states = []
+        attn_weights = []
+        next_cache = []
+        S = 0
+        for i,(layer,norm) in enumerate(zip(self.layers,self.lnorms)):
+            hidden_states = norm(hidden_states)
+            hidden_states = layer(
+                src=hidden_states,
+                src_mask=attn_mask,
+            )
+            hidden_states[torch.isnan(hidden_states)] = 0
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            #past_key_values=next_cache,
+            past_key_values=None,
+            #hidden_states=all_hidden_states,
+        )
+
+    def tforce_fwd(self,
+                   inpts:torch.Tensor,
+                   mask:torch.Tensor=None,
+                   pad_mask:torch.Tensor=None,
+                   inputs_embeds:torch.Tensor=None,
+                   past_key_values=None,
+                   use_cache=False,
+                   temperature=None,
+                   hidden_states_only=False,
+                   *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                true means unattended locations
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            inputs_embeds: tensor (B,S,E)
+                optionally argue embeddings instead of token ids
+            past_key_values: tuple of tuple of tensors
+                the output of a huggingface cache. used to speed up
+                computations. See huggingface documentation for more
+                details
+            hidden_states_only: bool
+                if true, will not bother computing the logits
+        Returns:
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S)
+                "logits": torch FloatTensor (B,S,N)
+                "past_key_values": None or tuple of tuple of tensors
+        """
+        if pad_mask is not None:
+            pad_mask = pad_mask.bool()
+        if mask is not None:
+            mask = mask.bool()
+
+        output = self.encoder(
+            inpts,
+            attention_mask=mask,
+            pad_mask=pad_mask,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            past_key_values=past_key_values,
+        )
+        if hidden_states_only:
+            return {
+                "last_hidden_state": output.last_hidden_state,
+                "past_key_values": getattr(output,"past_key_values",None),
+                "logits": getattr(output,"logits",None),
+            }
+        if not hasattr(output, "logits"):
+            og_shape = output.last_hidden_state.shape
+            state = output.last_hidden_state.reshape(-1,og_shape[-1])
+            logits = self.lm_head(
+                self.decoder(state)
+            ).reshape(*og_shape[:-1], -1)
+        else: logits = output.logits
+        pred_ids = self.sample_with_temperature(
+            logits, temperature
+        )
+        return {
+            "last_hidden_state": output.last_hidden_state,
+            "logits": logits,
+            "pred_ids": pred_ids,
+            "past_key_values": getattr(output,"past_key_values",None),
+        }
+
+    def freedom_fwd(self,
+                    inpts:torch.Tensor,
+                    mask:torch.Tensor=None,
+                    pad_mask:torch.Tensor=None,
+                    n_steps:int=1,
+                    incl_all_inpts:bool=False,
+                    temperature=None,
+                    inputs_embeds=None,
+                    past_key_values=None,
+                    stop_ids=None,
+                    *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                true means padding, or unattended locations
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". "predicted spaces" includes the shifted initial
+                inputs. This is useful to save a concatenation during
+                the data bootstrapping phase.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            inputs_embeds: tensor (B,S,E)
+                optionally argue embeddings instead of token ids
+            past_key_values: tuple of tuple of tensors
+                the output of a huggingface cache. used to speed up
+                computations. See huggingface documentation for more
+                details
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
+        Returns:
+            ret_dict: dict
+                "pred_ids": torch LongTensor (B,S+NSteps)
+                "logits": torch FloatTensor (B,S+NSteps,NTokens)
+                "past_key_values": None or tuple of tuple of tensors
+                "last_hidden_state": torch FloatTensor (B,S+NSteps,E)
+        """
+        n_loops = n_steps + 1
+
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
+
+        if inpts is None:
+            B,S = inputs_embeds.shape[:2]
+        else:
+            B,S = inpts.shape
+
+        pred_ids = torch.zeros(
+            (B,S+n_loops+int(incl_all_inpts)), device=self.get_device()
+        ).long()
+        if inpts is not None:
+            pred_ids[:,:S] = inpts
+        logits = torch.zeros(
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
+            device=self.get_device()
+        )
+        if inpts is not None:
+            logits[:,:S-1+incl_all_inpts].scatter_(
+                dim=-1,
+                index=inpts[:, 1-incl_all_inpts:S, None],
+                src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+            )
+
+        inpt_embs = inputs_embeds
+
+        # Masks
+        attn_mask = None
+        if pad_mask is not None:
+            pad_mask = pad_mask.bool()
+            if pad_mask.shape[-1]<S+n_loops:
+                p = S+n_loops - pad_mask.shape[-1]
+                pad_mask = torch.nn.functional.pad(
+                    pad_mask, (0, p), value=False
+                )
+        # Custom attention mask
+        if mask is not None:
+            mask = mask.bool()
+            if mask.shape[-1]<S+n_steps:
+                p = S+n_steps - mask.shape[-1]
+                mask = torch.nn.functional.pad(
+                    mask, (0, p, 0, p), value=False
+                )
+        # Need to ensure the padding mask is the full length of the
+        # past_key_values if past_key_values is not none
+        p_end = S
+        if past_key_values is not None and past_key_values[0] is not None:
+            # pkv idxs: layer, k or v, values
+            p_end = past_key_values[0][0].shape[1]
+
+        h_states = []
+
+        for step in range(n_loops):
+            if pad_mask is not None:
+                e = p_end+step
+                pmask = pad_mask[:,:e]
+            if mask is not None:
+                e = p_end+step
+                attn_mask = mask[:,:e,:e]
+
+            output = self.encoder(
+                input_ids=inpts,
+                attention_mask=attn_mask,
+                pad_mask=pmask,
+                use_cache=True,
+                past_key_values=past_key_values,
+                inputs_embeds=inpt_embs,
+            )
+            past_key_values = output.past_key_values
+
+            if len(h_states)==0:
+                h_states.append(output.last_hidden_state)
+            else:
+                h_states.append(output.last_hidden_state[:,-1:])
+            if not hasattr(output, "logits"):
+                state = h_states[-1][:,-1]
+                pred = self.lm_head(self.decoder(state))
+            else: pred = output.logits[:,-1]
+            logits[:,S-1+step+incl_all_inpts] = pred
+            argmaxs = self.sample_with_temperature(
+                pred, temperature
+            ).squeeze()
+            pred_ids[:,S+step+int(incl_all_inpts)] = argmaxs
+            if step < n_loops-1:
+                inpt = pred_ids[:,S+step:S+step+1]
+                inpt_emb = self.embeddings(inpt)
+                if stop_ids is not None and torch.isin(inpt, stop_ids):
+                    logits = logits[:,:S+step+1]
+                    pred_ids = pred_ids[:,:S+step+1]
+                    break
+                if inpts is None:
+                    inpt_embs = torch.cat([inpt_embs, inpt_emb],dim=1)
+                else:
+                    inpts = torch.cat([inpts, inpt],dim=1)
+        return {
+            "logits": logits,
+            "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
+            "past_key_values": past_key_values,
+            "last_hidden_state": torch.cat(h_states, dim=1),
+        }
+
 
 
 class IdentityPositionalEncoding(nn.Module):
@@ -1365,11 +1932,21 @@ class PositionalEncoding(nn.Module):
 
         return self.dropout( fx )
 
-    def vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+    def vanil_forward(self,
+                      x: Tensor,
+                      pids: Tensor=None,
+                      *args, **kwargs) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            pids: LongTensor (B,S)
         """
+        #if pids is not None:
+        #    shape = [s for s in pids.shape] + [self.pe.shape[-1]]
+        #    posencs = self.pe[pids.reshape(-1)].reshape(shape)
+        #else:
+        #    posencs = self.pe
+        #x = self.dropout( x + self.posenc_dropout(posencs[:x.size(1)]) )
         x = self.dropout( x + self.posenc_dropout(self.pe[:x.size(1)]) )
         return x
 
@@ -1690,7 +2267,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    model = globals()[config.get("model_type","Transformer")](**config)
-    #model = globals()[config.get("model_type","GRU")](**config)
+    #model = globals()[config.get("model_type","TorchTransformer")](**config)
+    model = globals()[config.get("model_type","GRU")](**config)
     return LossWrapper(model=model, config=config, **config)
 

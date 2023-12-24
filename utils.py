@@ -302,7 +302,7 @@ def get_mask_past_id(src, id_):
     # if id_ does not appear, then default idx is past last idx
     id_idxs[torch.sum(is_id,dim=-1)==0] = src.shape[-1]
     arange = torch.arange(S)[None].repeat((B,1)).long()
-    mask = arange.to(DEVICES[id_idxs.get_device()])>id_idxs[:,None]
+    mask = arange.to(device_fxn(id_idxs.get_device()))>id_idxs[:,None]
     return mask
 
 

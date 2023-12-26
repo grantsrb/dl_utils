@@ -3,6 +3,7 @@ import torch
 import os
 import sys
 import subprocess
+import datetime
 try:
     import cv2
 except:
@@ -22,6 +23,9 @@ def try_key(d, key, val):
     if key in d:
         return d[key]
     return val
+
+def get_datetime_str():
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def resize2Square(img, size):
     """

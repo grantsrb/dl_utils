@@ -3,8 +3,7 @@ import pickle
 import os
 import json
 import yaml
-from datetime import datetime
-from .utils import get_git_revision_hash, package_versions
+from .utils import get_git_revision_hash, package_versions, get_datetime_str
 import numpy as np
 
 BEST_CHECKPT_NAME = "best_checkpt_0.pt.best"
@@ -635,7 +634,7 @@ def record_session(config, model, globals_dict=None, verbose=False):
     mode = "a" if "resume_folder" in config else "w"
     packages = package_versions(globals_dict=globals_dict,verbose=verbose)
     with open(os.path.join(sf,h+".txt"),mode) as f:
-        dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        dt_string = get_datetime_str()
         f.write(dt_string)
         f.write("\nGit Hash: {}".format(git_hash))
         f.write("\nPackage Versions:")

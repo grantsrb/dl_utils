@@ -3,7 +3,7 @@ import torch
 import os
 import sys
 import subprocess
-import datetime
+from datetime import datetime
 try:
     import cv2
 except:

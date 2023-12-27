@@ -211,6 +211,23 @@ def is_incomplete_folder(path):
         if "hyperparams" in content: has_hyps = True
     return has_hyps and is_empty
 
+def is_exp_folder(path):
+    """
+    Checks to see if the argued path is an exp folder. i.e. does it
+    contain at least 1 model folder.
+
+    Args:
+        path: str
+            full path to the folder in question.
+    Returns:
+        is_folder: bool
+            if the argued path is to an experiment folder, will return
+            true. Otherwise returns false.
+    """
+    if not os.path.isdir(path): return False
+    mfs = get_model_folders(path)
+    return len(mfs)>0
+
 def get_model_folders(exp_folder, incl_full_path=False, incl_empty=True):
     """
     Returns a list of paths to the model folders contained within the

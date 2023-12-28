@@ -13,9 +13,12 @@ from .utils import (
 
 from transformers import LlamaModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask
-)
+try:
+    from transformers.modeling_attn_mask_utils import (
+        _prepare_4d_causal_attention_mask
+    )
+except:
+    print("Failed to import causal attention mask util")
 from typing import List, Optional, Tuple, Union
 
 DEVICES = {

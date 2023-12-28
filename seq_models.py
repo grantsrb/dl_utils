@@ -22,9 +22,12 @@ from transformers import (
 )
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask
-)
+try:
+    from transformers.modeling_attn_mask_utils import (
+        _prepare_4d_causal_attention_mask
+    )
+except:
+    print("Failed to import causal attention mask util")
 
 DEVICES = {
     -1: "cpu", **{i:i for i in range(10)}

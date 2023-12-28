@@ -287,7 +287,7 @@ def get_one_hot(ids, L):
     )
     return one_hots
 
-def get_mask_past_id(src, id_):
+def get_mask_past_id(src, id_, incl_id=False):
     """
     Returns a mask in which ones denote all spaces after the first
     occurance of the argued `id_`
@@ -295,20 +295,49 @@ def get_mask_past_id(src, id_):
     Args:
         src: long tensor  (B,S)
         id_: int
+        incl_id: bool
+            optionally include the first occurance of the id in the
+            mask.
     Returns:
         mask: bool tensor (B,S)
-            true values denote indexes past the first occurance of the `id_` along
-            the last dimension
+            true values denote indexes past or including the first
+            occurance of the `id_` along the last dimension
     """
+    return get_mask_past_ids(src, ids=id_)
+
+def get_mask_past_ids(src, ids, incl_id=False):
+    """
+    Returns a mask in which ones denote all spaces after the first
+    occurance of any of the values within `ids`.
+
+    Args:
+        src: long tensor  (B,S)
+        ids: sequence of ints or int or long tensor (M,)
+        incl_id: bool
+            optionally include the first occurance of the id in the
+            mask.
+    Returns:
+        mask: bool tensor (B,S)
+            true values denote indexes past (or including) the first
+            occurance of a value within `ids` along the last dimension
+    """
+    if type(ids)==int:
+        ids = torch.LongTensor([ids])
+    elif type(ids)==list or type(ids)==set:
+        ids = torch.LongTensor([*ids])
+    device = device_fxn(src.get_device())
+    ids = ids.to(device)
     B,S = src.shape
-    is_id = (src==id_).long()
+    is_id = torch.isin(src, ids).long()
     id_idxs = torch.argmax(is_id, dim=-1)
-    # if id_ does not appear, then default idx is past last idx
+    # if ids does not appear, then default idx is past last idx
     id_idxs[torch.sum(is_id,dim=-1)==0] = src.shape[-1]
     arange = torch.arange(S)[None].repeat((B,1)).long()
-    mask = arange.to(device_fxn(id_idxs.get_device()))>id_idxs[:,None]
+    if incl_id:
+        mask = arange.to(device)>=id_idxs[:,None]
+    else:
+        mask = arange.to(device)>id_idxs[:,None]
     return mask
-
 
 def get_causal_mask_like(inpt: torch.Tensor):
     """

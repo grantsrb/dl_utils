@@ -163,6 +163,7 @@ def is_model_folder(path, exp_name=None, incl_empty=True):
         model folders.
     """
     check_folder = os.path.expanduser(path)
+    if not os.path.isdir(check_folder): return False
     if incl_empty and exp_name is not None:
         # Remove ending slash if there is one
         if check_folder[-1]=="/": check_folder = check_folder[:-1]
@@ -203,6 +204,7 @@ def is_incomplete_folder(path):
     exp_name: str or None
     """
     check_folder = os.path.expanduser(path)
+    if not os.path.isdir(check_folder): return False
     contents = os.listdir(check_folder)
     is_empty = True
     has_hyps = False

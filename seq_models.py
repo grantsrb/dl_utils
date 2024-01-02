@@ -47,7 +47,7 @@ class SequenceModule(tmods.CoreModule):
                 drop_p:float=0.5,
                 max_posencs:int=1000,
                 posenc_drop_p:float=None,
-                learn_posencs:bool=False,
+                learn_posencs:bool=True,
                 actv_fxn:str="gelu",
                 scale_attn_weights:bool=True,
                 scale_by_inv_layer:bool=True,
@@ -56,6 +56,7 @@ class SequenceModule(tmods.CoreModule):
                 pretrained:bool=False,
                 init_range:float=0.1,
                 seq_len:int=2048,
+                #add_zero_attn:bool=False,
                 *args, **kwargs):
         """
         n_tokens: int
@@ -108,6 +109,11 @@ class SequenceModule(tmods.CoreModule):
         init_range: float
             a lower and upper bound for uniform weight sampling for
             the embeddings and output dense layer.
+        # Commented out largely due to poorer performance
+        #add_zero_attn: bool
+        #    if true, will allow the model to learn zero attention,
+        #    essentially allowing for a residual connection to add
+        #    nothing to the persistent representation.
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -134,6 +140,7 @@ class SequenceModule(tmods.CoreModule):
         self.pretrained = pretrained
         self.init_range = init_range
         self.seq_len = seq_len
+        #self.add_zero_attn = add_zero_attn
 
     def init_weights(self, init_range=0.1) -> None:
         pass
@@ -705,11 +712,6 @@ class Transformer(SequenceModule):
     def get_prep_tensors(self,
                 inputs_embeds=None,
                 attention_mask=None,
-
-                ## TODO
-                #pad_mask=None,
-                ## TODO
-
                 past_key_values=None,
                 position_ids=None,
                 *args, **kwargs):
@@ -773,45 +775,11 @@ class Transformer(SequenceModule):
                 new_mask.masked_fill_(~attention_mask, -1e33)
                 attention_mask = new_mask
 
-        #print("Amask:", attention_mask.shape, attention_mask.dtype)
-        #print("early Amask:", attention_mask[0,:10,:10])
-        #print("Laste Amask:", attention_mask[0,-10:,-10:])
-
-        ## TODO
-        #if pad_mask is not None:
-        #    comp_mask = _prepare_4d_causal_attention_mask(
-        #        attention_mask=pad_mask,
-        #        input_shape=(B, S),
-        #        inputs_embeds=inputs_embeds.clone(),
-        #        past_key_values_length=past_kv_len,
-        #    )
-        #    print("pre comp_mask", comp_mask.shape)
-        #    print("pre attn_mask", attention_mask.shape)
-        #    print("pre comp:",comp_mask[0,0])
-        #    if comp_mask.dtype!=torch.bool:
-        #        comp_mask = (comp_mask==0)
-        #    if len(attention_mask.shape)==4:
-        #        comp_mask = comp_mask[:,:,-S:]
-        #    equal = comp_mask!=attention_mask
-        #    print("tot sum:", equal.float().sum())
-        #    print("row sum:", equal.reshape(len(equal),-1).float().sum(1))
-        #    print("comp_mask", comp_mask.shape)
-        #    print("attn_mask", attention_mask.shape)
-        #    print("comp:",comp_mask[0,0,0])
-        #    print("attn:",attention_mask[0,0,0])
-        #    if past_key_values is not None:
-        #        assert False
-        ## TODO
-
         return position_ids, attention_mask
 
     def encoder(self,
                 input_ids=None,
                 attention_mask=None,
-
-                #TODO
-                pad_mask=None,
-                #TODO
 
                 use_cache=False,
                 past_key_values=None,
@@ -849,59 +817,12 @@ class Transformer(SequenceModule):
             inputs_embeds = self.embeddings(input_ids)
         hidden_states = inputs_embeds
 
-        #if attention_mask is not None:
-        #    print("PREP ATTENTION, ", attention_mask.dtype)
-        #    print(attention_mask.shape)
-        #    if len(attention_mask.shape)==3:
-        #        a = attention_mask[0].long()
-        #    else:
-        #        a = attention_mask.long()
-        #    print("attn first 10:")
-        #    for i in range(min(a.shape[0], 5)):
-        #        print(a[i,:10].tolist())
-        #    print(a[-1,:10].tolist())
-        #    print()
-
-        #    print("attn last 10:")
-        #    print(a[0,-10:].tolist())
-        #    for i in reversed(range(1,min(a.shape[0], 6))):
-        #        print(a[-i,-10:].tolist())
-        #    print()
-        #    print()
-
         position_ids, attn_mask = self.get_prep_tensors(
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-
-            ## TODO
-            #pad_mask=pad_mask,
-            ## TODO
-
-
             position_ids=position_ids,
         )
-        
-
-        #print("POST,", attn_mask.dtype)
-        #print("Shape", attn_mask.shape)
-        #a = attn_mask[0,0].long()
-        #print("attn lines:")
-        #for i in range(a.shape[0]):
-        #    print(i,a[i,:25].tolist()+a[i,-25:].tolist())
-        #print()
-        #assert False
-
-        #print("attn last 10:")
-        #print(a[0,-10:].tolist())
-        #for i in reversed(range(1,min(a.shape[0], 6))):
-        #    print(a[-i,-10:].tolist())
-        #print()
-        #print()
-
-        #print("attn:", attn_mask.shape)
-        #if (a==0).float().sum()>0 and (a<0).float().sum()==0:
-        #    assert False
 
         all_hidden_states = []
         attn_weights = []
@@ -925,30 +846,7 @@ class Transformer(SequenceModule):
                 past_key_value = None
             if attn_mask is not None:
                 amask = attn_mask[:,:,S:S+hidden_states.shape[1]]
-
-                #if amask.shape[0]!=hidden_states.shape[0]:
-                #    s = [1 for _ in range(len(amask.shape)-1)]
-                #    amask = amask.repeat(
-                #        tuple([hidden_states.shape[0]]+s)
-                #    )
-
             else: amask = None
-
-            #if use_cache and amask is not None:
-            #    if amask.dtype==torch.bool:
-            #        new_mask = torch.zeros_like(amask).float()
-            #        new_mask.masked_fill_(~amask, -math.inf)
-            #        amask = new_mask
-            #### TODO: 
-            #if i==0:
-            #    if amask is not None:
-            #        print("Amask:", amask.shape, amask.dtype)
-            #        print("early Amask:", amask[0,:5,:5])
-            #        print("Laste Amask:", amask[0,-5:,-5:])
-            #    else:
-            #        print("asmask is none")
-            #    if past_key_values is not None:
-            #        assert False
 
             output = layer(
                 hidden_states=hidden_states,
@@ -1017,11 +915,6 @@ class Transformer(SequenceModule):
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,
-
-            ##TODO
-            #pad_mask=~pad_mask.bool(),
-            ##TODO
-
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             past_key_values=past_key_values,
@@ -1183,11 +1076,6 @@ class Transformer(SequenceModule):
                 use_cache=True,
                 past_key_values=past_key_values,
                 inputs_embeds=inpt_emb,
-
-                ##TODO
-                #pad_mask=pad_mask.bool()[:,:e],
-                ##TODO
-
             )
             past_key_values = output.past_key_values
 
@@ -1492,16 +1380,6 @@ class HFTransformer(SequenceModule):
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]
                     break
-                #if attn_mask is not None:
-                #    if pad_mask is not None:
-                #        attn_mask = pad_mask[:,:p_end+step+1]
-                #    if mask is not None:
-                #        e = p_end+step+1
-                #        if pad_mask is not None:
-                #            attn_mask = padmask2attnmask(attn_mask)
-                #            attn_mask = mask[:,:e,:e]&attn_mask
-                #        else:
-                #            attn_mask = mask[:,:e,:e]
         return {
             "logits": logits,
             "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
@@ -1514,20 +1392,22 @@ class TorchTransformer(SequenceModule):
     This is a vanilla transformer that uses a PyTorch backend. This
     model has a lower chance of becoming deprecated.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self,
+            encoder_layer_class=torch.nn.TransformerEncoderLayer,
+            *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = 'Transformer'
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        # TODO: enable rotary encodings
         self.pos_encs = SinPositionalEncoding(
             d_model=self.d_model,
-            max_len=2048,
+            max_len=max(2048, self.seq_len),
             learnable=self.learn_posencs,
         )
         self.layers = torch.nn.ModuleList([])
-        self.lnorms = torch.nn.ModuleList([])
-            # TODO: make custom encoder layer
+
         for el in range(self.n_layers):
-            self.layers.append(torch.nn.TransformerEncoderLayer(
+            self.layers.append(encoder_layer_class(
                 d_model=self.d_model,
                 nhead=self.n_heads,
                 dim_feedforward=self.d_model*self.h_mult,
@@ -1536,7 +1416,6 @@ class TorchTransformer(SequenceModule):
                 batch_first=True,
                 norm_first=True,
             ))
-            self.lnorms.append(torch.nn.LayerNorm(self.d_model))
         self.decoder = nn.LayerNorm(self.d_model)
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
@@ -1552,7 +1431,7 @@ class TorchTransformer(SequenceModule):
         Args:
             sz: int
             attention_mask: BoolTensor (B,S,S) or (S,S)
-                True values mean masked, do not attend to indices
+                True values mean masked, not attended to indices
             pad_mask: BoolTensor (B,S)
         """
         if attention_mask is None:
@@ -1634,8 +1513,7 @@ class TorchTransformer(SequenceModule):
         attn_weights = []
         next_cache = []
         S = 0
-        for i,(layer,norm) in enumerate(zip(self.layers,self.lnorms)):
-            hidden_states = norm(hidden_states)
+        for i,layer in enumerate(self.layers):
             hidden_states = layer(
                 src=hidden_states,
                 src_mask=attn_mask,
@@ -1871,6 +1749,177 @@ class TorchTransformer(SequenceModule):
             "last_hidden_state": torch.cat(h_states, dim=1),
         }
 
+class PKVTransformer(Transformer):
+    """
+    This is a vanilla transformer that uses a PyTorch backend with the
+    ability to only compute the most recent token if desired. This
+    model has a lower chance of becoming deprecated.
+    """
+    def __init__(self,
+                encoder_layer_class=tmods.PKVEncoderLayer,
+                *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        # TODO: enable rotary encodings
+        self.pos_encs = SinPositionalEncoding(
+            d_model=self.d_model,
+            max_len=max(2048, self.seq_len),
+            learnable=self.learn_posencs,
+        )
+        self.layers = torch.nn.ModuleList([])
+        for el in range(self.n_layers):
+            self.layers.append(encoder_layer_class(
+                d_model=self.d_model,
+                nhead=self.n_heads,
+                dim_feedforward=self.d_model*self.h_mult,
+                dropout=self.drop_p,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            ))
+        self.init_weights()
+
+    def combine_attn_masks(self,
+                sz=0,
+                attention_mask=None,
+                pad_mask=None):
+        """
+        This function manually combines attention masks because pytorch
+        does it stupidly.
+
+        Args:
+            sz: int
+            attention_mask: BoolTensor (B,S,S) or (S,S)
+                True values mean masked, not attended to indices
+            pad_mask: BoolTensor (B,S)
+        """
+        if attention_mask is None:
+            attn_mask = generate_square_subsequent_mask(
+                sz,
+                device=self.get_device(),
+                dtype="float"
+            )
+        else:
+            if attention_mask.dtype==torch.bool:
+                attention_mask = attention_mask.float().masked_fill_(
+                    attention_mask, float("-inf"))
+            attn_mask = attention_mask
+        if pad_mask is not None:
+            pad_mask = pad_mask.float().masked_fill_(
+                pad_mask,float("-inf"))
+            S = pad_mask.shape[1]
+            attn_mask = attn_mask + pad_mask[:,None].repeat((1,S,1))
+            attn_mask[(attn_mask==0).sum(-1)==0] = 0
+        if len(attn_mask.shape)>2:
+            attn_mask = torch.repeat_interleave(
+                input=attn_mask,
+                repeats=self.n_heads,
+                dim=0,
+            )
+        return attn_mask
+
+
+    def encoder(self,
+                input_ids=None,
+                attention_mask=None,
+                pad_mask=None,
+                use_cache=False,
+                past_key_values=None,
+                inputs_embeds=None,
+                position_ids=None,
+                output_attentions=False,
+                *args, **kwargs):
+        """
+        Arguments:
+            input_ids: Long Tensor, shape ``[bsize, seq_len]``
+                the input ids. one of this or inputs_embeds must be not
+                None
+            attention_mask: Tensor, shape (B,S,S) or (B,S)
+                false values mean masked, not attended to indices.
+            pad_mask: Tensor, shape (B,S)
+                false values mean masked, not attended to indices.
+            use_cache: bool
+                if true, will return the updated past_key_values for
+                future speedups
+            past_key_values: list of lists of tensors
+                the cached computations returned by the layer when
+                `use_cache` is true.
+            inputs_embeds: None or torch FloatTensor (B,S,E)
+                the input embeddings. this must not be None if input_ids
+                is None. input_ids overrides this argument if both are
+                not None.
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
+            output_attentions: bool
+                if true, will return the attention weights
+        Returns:
+            BaseModelOutputWithPast
+        """
+        if inputs_embeds is None:
+            inputs_embeds = self.embeddings(input_ids)
+        hidden_states = inputs_embeds
+
+        if attention_mask is not None:
+            if attention_mask.dtype==torch.bool:
+                attention_mask = ~attention_mask
+            else:
+                attention_mask = attention_mask==0
+        if pad_mask is not None:
+            pad_mask = ~pad_mask
+        attn_mask = self.combine_attn_masks(
+            sz=inputs_embeds.shape[1],
+            attention_mask=attention_mask,
+            pad_mask=pad_mask,
+        )
+        attn_mask = attn_mask==0
+        og_shape = attn_mask.shape
+        attn_mask = attn_mask.reshape(-1,og_shape[-1])
+        will_be_nan = attn_mask.long().sum(-1)==0
+        if torch.any(will_be_nan):
+            attn_mask[will_be_nan] = 1
+        attn_mask = attn_mask.reshape(og_shape)
+        if past_key_values is not None and position_ids is None:
+            position_ids = torch.arange(
+                past_key_values[0][0].shape[1],
+                past_key_values[0][0].shape[1]+inputs_embeds.shape[1],
+            ).long().to(self.get_device())
+        hidden_states = self.pos_encs(inputs_embeds, pids=position_ids)
+
+        past_key_value = None
+        next_cache = [] if use_cache else None
+
+        all_hidden_states = []
+        attn_weights = []
+        next_cache = []
+        S = 0
+        for i,layer in enumerate(self.layers):
+            if past_key_values is not None:
+                past_key_value = past_key_values[i]
+            ret_dict = layer(
+                src=hidden_states,
+                src_mask=attn_mask,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+            )
+            hidden_states = ret_dict["hidden_states"]
+            if use_cache:
+                next_cache.append(ret_dict["past_key_value"])
+            hidden_states[torch.isnan(hidden_states)] = 0
+            all_hidden_states.append(hidden_states)
+        if use_cache:
+            if past_key_values is not None:
+                pkv = past_key_values[-1]
+                hidden_states = torch.cat([pkv,hidden_states],dim=1)
+            next_cache.append(hidden_states)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+        )
+
+
+
 
 
 class IdentityPositionalEncoding(nn.Module):
@@ -1944,13 +1993,12 @@ class PositionalEncoding(nn.Module):
             x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
             pids: LongTensor (B,S)
         """
-        #if pids is not None:
-        #    shape = [s for s in pids.shape] + [self.pe.shape[-1]]
-        #    posencs = self.pe[pids.reshape(-1)].reshape(shape)
-        #else:
-        #    posencs = self.pe
-        #x = self.dropout( x + self.posenc_dropout(posencs[:x.size(1)]) )
-        x = self.dropout( x + self.posenc_dropout(self.pe[:x.size(1)]) )
+        if pids is not None:
+            shape = [s for s in pids.shape] + [self.pe.shape[-1]]
+            posencs = self.pe[pids.reshape(-1)].reshape(shape)
+        else:
+            posencs = self.pe
+        x = self.dropout( x + self.posenc_dropout(posencs[:x.size(1)]) )
         return x
 
     def skip_vanil_forward(
@@ -2270,7 +2318,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    #model = globals()[config.get("model_type","TorchTransformer")](**config)
+    #model = globals()[config.get("model_type","PKVTransformer")](**config)
     model = globals()[config.get("model_type","GRU")](**config)
     return LossWrapper(model=model, config=config, **config)
 

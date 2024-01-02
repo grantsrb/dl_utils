@@ -19,6 +19,7 @@ try:
     )
 except:
     print("Failed to import causal attention mask util")
+from torch import Tensor
 from typing import List, Optional, Tuple, Union
 
 DEVICES = {
@@ -774,6 +775,123 @@ class FlexibleLlamaModel(LlamaModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
+
+class PKVEncoderLayer(nn.TransformerEncoderLayer):
+    """
+    A custom transformer encoder layer using PyTorch's MultiHeadAttention
+    module. The purpose of building a custom module is for ease caching
+    intermediate computations while maintaining a great degree of
+    flexibility over the architecture.
+    """
+    #def __init__(self, *args, add_zero_attn=False, **kwargs):
+    #    super().__init__(*args, **kwargs)
+    #    factory_kwargs = {
+    #        "device": kwargs.get("device", None),
+    #        "dtype": kwargs.get("dtype", None),}
+    #    self.self_attn = nn.MultiheadAttention(
+    #        embed_dim=kwargs["d_model"],
+    #        num_heads=kwargs["nhead"],
+    #        dropout=kwargs.get("dropout", 0.1),
+    #        bias=kwargs.get("bias",True),
+    #        batch_first=kwargs.get("batch_first", False),
+    #        add_zero_attn=add_zero_attn,
+    #        **factory_kwargs)
+
+    # self-attention block
+    def _ma_block(self, q: Tensor, kv: Tensor,
+                  attn_mask: Optional[Tensor],
+                  key_padding_mask: Optional[Tensor],
+                  is_causal: bool = False) -> Tensor:
+        x = self.self_attn(q, kv, kv,
+                           attn_mask=attn_mask,
+                           key_padding_mask=key_padding_mask,
+                           need_weights=False,
+                           is_causal=is_causal)[0]
+        return self.dropout1(x)
+
+    def forward(self,
+            src: Tensor,
+            src_mask: Optional[Tensor] = None,
+            src_key_padding_mask: Optional[Tensor] = None,
+            is_causal: bool = False,
+            past_key_value: tuple=None,
+            use_cache: bool=False,) -> Tensor:
+        r"""Pass the input through the encoder layer.
+
+        Args:
+            src: torch tensor (B,S,E)
+            src_mask: the mask for the src sequence (optional).
+                true/1s mean do attend
+            src_key_padding_mask: the mask for the src keys per batch (optional).
+                true/1s mean do attend
+            is_causal: If specified, applies a causal mask as ``src mask``.
+                Default: ``False``.
+                Warning:
+                ``is_causal`` provides a hint that ``src_mask`` is the
+                causal mask. Providing incorrect hints can result in
+                incorrect execution, including forward and backward
+                compatibility.
+            past_key_value: tensor (B,S,...) or None
+                if using caching, can argue a tensor here. It should
+                be the hidden states fed into this layer from the
+                previous step.
+            use_cache: bool
+                if true, will return the intermediate key_value
+                computations.
+        Returns:
+            fx: torch Tensor
+        """
+        ret_dict = dict()
+        if src_mask is not None:
+            src_mask = ~src_mask
+            if src_mask.shape[1]!=src.shape[1]:
+                src_mask = src_mask[:,-src.shape[1]:]
+        if src_key_padding_mask is not None:
+            src_key_padding_mask = ~src_key_padding_mask
+
+        if past_key_value is None:
+            if use_cache: ret_dict["past_key_value"] = [src.clone()]
+            hidden_states = super().forward(
+                src=src,
+                src_mask=src_mask,
+                src_key_padding_mask=src_key_padding_mask,
+                is_causal=is_causal,)
+            ret_dict["hidden_states"] = hidden_states
+        else:
+            full_seq = torch.cat(past_key_value+[src],dim=1)
+            if use_cache:
+                ret_dict["past_key_value"] = [full_seq.clone()]
+
+            if self.norm_first:
+                full_seq = self.norm1(full_seq)
+
+            x = full_seq[:,-src.shape[1]:]
+
+
+            #if src_mask is not None:
+            #    src_mask = ~src_mask
+            #    if src_mask.shape[1]!=x.shape[1]:
+            #        src_mask = src_mask[:,-x.shape[1]:]
+            #if src_key_padding_mask is not None:
+            #    src_key_padding_mask = ~src_key_padding_mask
+
+            x = x + self._ma_block(
+                q=x,
+                kv=full_seq,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                is_causal=is_causal)
+
+            if not self.norm_first:
+                x = self.norm1(x)
+            else:
+                x = self.norm2(x)
+            x = x + self._ff_block(x)
+            if not self.norm_first:
+                x = self.norm2(x)
+
+            ret_dict["hidden_states"] = x
+        return ret_dict
 
 def print_tensor(t, n_tab=0):
     if len(t.shape)==2:

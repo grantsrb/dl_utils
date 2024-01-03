@@ -11,23 +11,27 @@ from .utils import (
 )
 import math
 
-from transformers import (
-    CONFIG_MAPPING,
-    GPT2Config,
-    AutoModelForCausalLM,
-    OpenAIGPTConfig,
-    GPTJConfig,
-    LlamaConfig,
-    TransfoXLConfig,
-)
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast
 try:
+    from transformers import (
+        CONFIG_MAPPING,
+        GPT2Config,
+        AutoModelForCausalLM,
+        OpenAIGPTConfig,
+        GPTJConfig,
+        LlamaConfig,
+        TransfoXLConfig,
+    )
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer
     from transformers.modeling_attn_mask_utils import (
         _prepare_4d_causal_attention_mask
     )
 except:
     print("Failed to import causal attention mask util")
+
+try:
+    from transformers.modeling_outputs import BaseModelOutputWithPast
+except:
+    from .torch_modules import BaseModelOutputWithPast
 
 DEVICES = {
     -1: "cpu", **{i:i for i in range(10)}
@@ -694,93 +698,81 @@ class LSTM(RNN):
 
 
 class Transformer(SequenceModule):
-    def __init__(self, *args, **kwargs):
+    """
+    This is a vanilla transformer that uses a PyTorch backend with the
+    ability to only compute the most recent token if desired. This
+    model has a lower chance of becoming deprecated.
+    """
+    def __init__(self,
+                encoder_layer_class=tmods.RotaryEncoderLayer,
+                pos_enc_class=tmods.IdentityPositionalEncoding,
+                *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = 'Transformer'
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
-        config = self.get_config()
+        self.pos_encs = pos_enc_class(
+            d_model=self.d_model,
+            max_len=max(2048, self.seq_len),
+            learnable=self.learn_posencs,
+        )
         self.layers = torch.nn.ModuleList([])
         for el in range(self.n_layers):
-            try:
-                self.layers.append(LlamaDecoderLayer(config,layer_idx=el))
-            except TypeError:
-                self.layers.append(LlamaDecoderLayer(config))
+            self.layers.append(encoder_layer_class(
+                d_model=self.d_model,
+                nhead=self.n_heads,
+                dim_feedforward=self.d_model*self.h_mult,
+                dropout=self.drop_p,
+                activation=F.gelu,
+                batch_first=True,
+                norm_first=True,
+            ))
         self.decoder = nn.LayerNorm(self.d_model)
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
 
-    def get_prep_tensors(self,
-                inputs_embeds=None,
+    def combine_attn_masks(self,
+                sz=0,
                 attention_mask=None,
-                past_key_values=None,
-                position_ids=None,
-                *args, **kwargs):
+                pad_mask=None):
         """
-        This function preps a number of tensors that are used for
-        processing the inputs.
+        This function manually combines attention masks because pytorch
+        does it stupidly.
 
-        Arguments:
-            inputs_embeds: None or torch FloatTensor (B,S,E)
-                the input embeddings. this must not be None if input_ids
-                is None. input_ids overrides this argument if both are
-                not None.
-            attention_mask: Tensor, shape (B,S,S) or (B,S)
-                true values mean non-masked and attended to indices.
-                NOTE: This is flipped from the other functions!!!!
-            past_key_values: list of lists of tensors
-                the cached computations returned by the layer when
-                `use_cache` is true.
-            position_ids: None or LongTensor (B,S)
-                optionally argue the position ids for the positional
-                encodings.
-        Returns:
-            position_ids: LongTensor (1,S)
-                logits:
-            attention_mask: BoolTensor (B,1,S,S)
+        Args:
+            sz: int
+            attention_mask: BoolTensor (B,S,S) or (S,S)
+                True values mean masked, not attended to indices
+            pad_mask: BoolTensor (B,S)
         """
-        B,S,E = inputs_embeds.shape
-
-        past_kv_len = 0
-        if past_key_values is not None and past_key_values[0] is not None:
-            past_kv_len = past_key_values[0][0].shape[2]
-
-        if position_ids is None:
-            device = inputs_embeds.device
-            # Want only position ids of the inputs_embeds. not the past
-            # key values
-            position_ids = torch.arange(
-                past_kv_len,
-                S + past_kv_len,
-                dtype=torch.long,
-                device=device,
+        if attention_mask is None:
+            attn_mask = generate_square_subsequent_mask(
+                sz,
+                device=self.get_device(),
+                dtype="float"
             )
-            position_ids = position_ids.unsqueeze(0)
-
-        if attention_mask is None or len(attention_mask.shape)==2:
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask=attention_mask,
-                input_shape=(B, S),
-                inputs_embeds=inputs_embeds.clone(),
-                past_key_values_length=past_kv_len,
-            )
-        elif len(attention_mask.shape)==3:
-            attention_mask = attention_mask[:,None]
-        if attention_mask is not None:
-            #if attention_mask.dtype!=torch.bool:
-            #    attention_mask = attention_mask==0
-            if len(attention_mask.shape)==4:
-                attention_mask = attention_mask[:,:,-S:]
+        else:
             if attention_mask.dtype==torch.bool:
-                new_mask = torch.zeros_like(attention_mask).float()
-                new_mask.masked_fill_(~attention_mask, -1e33)
-                attention_mask = new_mask
-
-        return position_ids, attention_mask
+                attention_mask = attention_mask.float().masked_fill_(
+                    attention_mask, float("-inf"))
+            attn_mask = attention_mask
+        if pad_mask is not None:
+            pad_mask = pad_mask.float().masked_fill_(
+                pad_mask,float("-inf"))
+            S = pad_mask.shape[1]
+            attn_mask = attn_mask + pad_mask[:,None].repeat((1,S,1))
+            attn_mask[(attn_mask==0).sum(-1)==0] = 0
+        if len(attn_mask.shape)>2:
+            attn_mask = torch.repeat_interleave(
+                input=attn_mask,
+                repeats=self.n_heads,
+                dim=0,
+            )
+        return attn_mask
 
     def encoder(self,
                 input_ids=None,
                 attention_mask=None,
-
+                pad_mask=None,
                 use_cache=False,
                 past_key_values=None,
                 inputs_embeds=None,
@@ -793,8 +785,9 @@ class Transformer(SequenceModule):
                 the input ids. one of this or inputs_embeds must be not
                 None
             attention_mask: Tensor, shape (B,S,S) or (B,S)
-                true values mean non-masked, do attend to indices.
-                NOTE: This is flipped from the other functions!!!!
+                false values mean masked, not attended to indices.
+            pad_mask: Tensor, shape (B,S)
+                false values mean masked, not attended to indices.
             use_cache: bool
                 if true, will return the updated past_key_values for
                 future speedups
@@ -817,12 +810,34 @@ class Transformer(SequenceModule):
             inputs_embeds = self.embeddings(input_ids)
         hidden_states = inputs_embeds
 
-        position_ids, attn_mask = self.get_prep_tensors(
-            inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
+        if attention_mask is not None:
+            if attention_mask.dtype==torch.bool:
+                attention_mask = ~attention_mask
+            else:
+                attention_mask = attention_mask==0
+        if pad_mask is not None:
+            pad_mask = ~pad_mask
+        attn_mask = self.combine_attn_masks(
+            sz=inputs_embeds.shape[1],
             attention_mask=attention_mask,
-            position_ids=position_ids,
+            pad_mask=pad_mask,
         )
+        attn_mask = attn_mask==0
+        og_shape = attn_mask.shape
+        attn_mask = attn_mask.reshape(-1,og_shape[-1])
+        will_be_nan = attn_mask.long().sum(-1)==0
+        if torch.any(will_be_nan):
+            attn_mask[will_be_nan] = 1
+        attn_mask = attn_mask.reshape(og_shape)
+        if past_key_values is not None and position_ids is None:
+            position_ids = torch.arange(
+                past_key_values[0][0].shape[-2],
+                past_key_values[0][0].shape[-2]+inputs_embeds.shape[1],
+            ).long().to(self.get_device())
+        hidden_states = self.pos_encs(inputs_embeds, pids=position_ids)
+
+        past_key_value = None
+        next_cache = [] if use_cache else None
 
         all_hidden_states = []
         attn_weights = []
@@ -830,46 +845,27 @@ class Transformer(SequenceModule):
         S = 0
         for i,layer in enumerate(self.layers):
             if past_key_values is not None:
-                # past_key_values: layer, k or v, precomputed values
                 past_key_value = past_key_values[i]
-
-                # Need to get the correct entry in the attn mask if
-                # we argued a custom attention mask. This is actually
-                # the last row in the attn_mask, but we can do it
-                # this way to maintain compatibility with non-custom
-                # attn_masks
-                if attn_mask is not None:
-                    if attn_mask.shape[2]!=hidden_states.shape[1]:
-                        # past_key_value: B, NHeads, S, D/NHeads
-                        S = past_key_value[0].shape[2]
-            else:
-                past_key_value = None
-            if attn_mask is not None:
-                amask = attn_mask[:,:,S:S+hidden_states.shape[1]]
-            else: amask = None
-
-            output = layer(
-                hidden_states=hidden_states,
-                attention_mask=amask,
-                position_ids=position_ids,
+            ret_dict = layer(
+                src=hidden_states,
+                src_mask=attn_mask,
                 past_key_value=past_key_value,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-            # Parse Output
-            hidden_states = output[0]
+            hidden_states = ret_dict["hidden_states"]
+            if use_cache:
+                next_cache.append(ret_dict["past_key_value"])
+            hidden_states[torch.isnan(hidden_states)] = 0
             all_hidden_states.append(hidden_states)
-            if output_attentions:
-                attn_weights.append(output[1])
-                if use_cache:
-                    next_cache.append(output[2])
-            elif use_cache:
-                next_cache.append(output[1])
+        if use_cache:
+            if past_key_values is not None:
+                pkv = past_key_values[-1]
+                hidden_states = torch.cat([pkv,hidden_states],dim=1)
+            next_cache.append(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
-            attentions=attn_weights,
         )
 
     def tforce_fwd(self,
@@ -1399,7 +1395,7 @@ class TorchTransformer(SequenceModule):
         self.model_type = 'Transformer'
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         # TODO: enable rotary encodings
-        self.pos_encs = SinPositionalEncoding(
+        self.pos_encs = tmods.SinPositionalEncoding(
             d_model=self.d_model,
             max_len=max(2048, self.seq_len),
             learnable=self.learn_posencs,
@@ -1749,336 +1745,8 @@ class TorchTransformer(SequenceModule):
             "last_hidden_state": torch.cat(h_states, dim=1),
         }
 
-class PKVTransformer(Transformer):
-    """
-    This is a vanilla transformer that uses a PyTorch backend with the
-    ability to only compute the most recent token if desired. This
-    model has a lower chance of becoming deprecated.
-    """
-    def __init__(self,
-                encoder_layer_class=tmods.PKVEncoderLayer,
-                *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'Transformer'
-        # TODO: enable rotary encodings
-        self.pos_encs = SinPositionalEncoding(
-            d_model=self.d_model,
-            max_len=max(2048, self.seq_len),
-            learnable=self.learn_posencs,
-        )
-        self.layers = torch.nn.ModuleList([])
-        for el in range(self.n_layers):
-            self.layers.append(encoder_layer_class(
-                d_model=self.d_model,
-                nhead=self.n_heads,
-                dim_feedforward=self.d_model*self.h_mult,
-                dropout=self.drop_p,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            ))
-        self.init_weights()
-
-    def combine_attn_masks(self,
-                sz=0,
-                attention_mask=None,
-                pad_mask=None):
-        """
-        This function manually combines attention masks because pytorch
-        does it stupidly.
-
-        Args:
-            sz: int
-            attention_mask: BoolTensor (B,S,S) or (S,S)
-                True values mean masked, not attended to indices
-            pad_mask: BoolTensor (B,S)
-        """
-        if attention_mask is None:
-            attn_mask = generate_square_subsequent_mask(
-                sz,
-                device=self.get_device(),
-                dtype="float"
-            )
-        else:
-            if attention_mask.dtype==torch.bool:
-                attention_mask = attention_mask.float().masked_fill_(
-                    attention_mask, float("-inf"))
-            attn_mask = attention_mask
-        if pad_mask is not None:
-            pad_mask = pad_mask.float().masked_fill_(
-                pad_mask,float("-inf"))
-            S = pad_mask.shape[1]
-            attn_mask = attn_mask + pad_mask[:,None].repeat((1,S,1))
-            attn_mask[(attn_mask==0).sum(-1)==0] = 0
-        if len(attn_mask.shape)>2:
-            attn_mask = torch.repeat_interleave(
-                input=attn_mask,
-                repeats=self.n_heads,
-                dim=0,
-            )
-        return attn_mask
 
 
-    def encoder(self,
-                input_ids=None,
-                attention_mask=None,
-                pad_mask=None,
-                use_cache=False,
-                past_key_values=None,
-                inputs_embeds=None,
-                position_ids=None,
-                output_attentions=False,
-                *args, **kwargs):
-        """
-        Arguments:
-            input_ids: Long Tensor, shape ``[bsize, seq_len]``
-                the input ids. one of this or inputs_embeds must be not
-                None
-            attention_mask: Tensor, shape (B,S,S) or (B,S)
-                false values mean masked, not attended to indices.
-            pad_mask: Tensor, shape (B,S)
-                false values mean masked, not attended to indices.
-            use_cache: bool
-                if true, will return the updated past_key_values for
-                future speedups
-            past_key_values: list of lists of tensors
-                the cached computations returned by the layer when
-                `use_cache` is true.
-            inputs_embeds: None or torch FloatTensor (B,S,E)
-                the input embeddings. this must not be None if input_ids
-                is None. input_ids overrides this argument if both are
-                not None.
-            position_ids: None or LongTensor (B,S)
-                optionally argue the position ids for the positional
-                encodings.
-            output_attentions: bool
-                if true, will return the attention weights
-        Returns:
-            BaseModelOutputWithPast
-        """
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-        hidden_states = inputs_embeds
-
-        if attention_mask is not None:
-            if attention_mask.dtype==torch.bool:
-                attention_mask = ~attention_mask
-            else:
-                attention_mask = attention_mask==0
-        if pad_mask is not None:
-            pad_mask = ~pad_mask
-        attn_mask = self.combine_attn_masks(
-            sz=inputs_embeds.shape[1],
-            attention_mask=attention_mask,
-            pad_mask=pad_mask,
-        )
-        attn_mask = attn_mask==0
-        og_shape = attn_mask.shape
-        attn_mask = attn_mask.reshape(-1,og_shape[-1])
-        will_be_nan = attn_mask.long().sum(-1)==0
-        if torch.any(will_be_nan):
-            attn_mask[will_be_nan] = 1
-        attn_mask = attn_mask.reshape(og_shape)
-        if past_key_values is not None and position_ids is None:
-            position_ids = torch.arange(
-                past_key_values[0][0].shape[1],
-                past_key_values[0][0].shape[1]+inputs_embeds.shape[1],
-            ).long().to(self.get_device())
-        hidden_states = self.pos_encs(inputs_embeds, pids=position_ids)
-
-        past_key_value = None
-        next_cache = [] if use_cache else None
-
-        all_hidden_states = []
-        attn_weights = []
-        next_cache = []
-        S = 0
-        for i,layer in enumerate(self.layers):
-            if past_key_values is not None:
-                past_key_value = past_key_values[i]
-            ret_dict = layer(
-                src=hidden_states,
-                src_mask=attn_mask,
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-            )
-            hidden_states = ret_dict["hidden_states"]
-            if use_cache:
-                next_cache.append(ret_dict["past_key_value"])
-            hidden_states[torch.isnan(hidden_states)] = 0
-            all_hidden_states.append(hidden_states)
-        if use_cache:
-            if past_key_values is not None:
-                pkv = past_key_values[-1]
-                hidden_states = torch.cat([pkv,hidden_states],dim=1)
-            next_cache.append(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-        )
-
-
-
-
-
-class IdentityPositionalEncoding(nn.Module):
-    def __init__(self,
-                 drop_p:float=0.1,
-                 *args, **kwargs):
-        super().__init__()
-        self.dropout = nn.Dropout(p=drop_p)
-
-    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
-        """
-        x = self.dropout( x )
-        return x
-
-class PositionalEncoding(nn.Module):
-    def __init__(self,
-                 posenc_drop_p:float=0,
-                 drop_p:float=0.1,
-                 max_len:int=1000):
-        super().__init__()
-        self.posenc_dropout = nn.Dropout(p=posenc_drop_p)
-        self.dropout = nn.Dropout(p=drop_p)
-        self.arange = np.arange(max_len).astype("int")
-
-    def rand_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
-        """
-        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
-        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
-        x = self.dropout( x + self.posenc_dropout(self.pe[idxs]) )
-        return x
-
-    def skip_rand_forward(
-            self,
-            x: Tensor,
-            mask: Tensor,
-            *args,
-            **kwargs
-        ) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
-            mask: Tensor, shape ``[batch_size, seq_len]``
-                pad mask. true values represent padding/blotching
-        """
-        if mask is None: return self.rand_forward(x)
-        # pe: N, E
-        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
-        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
-        pe = self.posenc_dropout(self.pe[idxs])
-
-        sums = (~mask).float().sum(-1)
-        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        fx = torch.zeros_like(x)
-        fx[~mask] += pe[idxs]
-        fx = x + fx
-
-        return self.dropout( fx )
-
-    def vanil_forward(self,
-                      x: Tensor,
-                      pids: Tensor=None,
-                      *args, **kwargs) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
-            pids: LongTensor (B,S)
-        """
-        if pids is not None:
-            shape = [s for s in pids.shape] + [self.pe.shape[-1]]
-            posencs = self.pe[pids.reshape(-1)].reshape(shape)
-        else:
-            posencs = self.pe
-        x = self.dropout( x + self.posenc_dropout(posencs[:x.size(1)]) )
-        return x
-
-    def skip_vanil_forward(
-            self,
-            x: Tensor,
-            mask: Tensor,
-            *args,
-            **kwargs
-        ) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
-            mask: Tensor, shape ``[batch_size, seq_len]``
-                pad mask. true values represent padding/blotching
-        """
-        if mask is None: return self.vanil_forward(x)
-        pe = self.posenc_dropout(self.pe[:x.size(1)])
-
-        sums = torch.sum((~mask).float(), -1)
-        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        fx = torch.zeros_like(x)
-        fx[~mask] += pe[idxs]
-        fx = x + fx
-
-        return self.dropout( fx )
-
-class RandPositionalEncoding(PositionalEncoding):
-    def __init__(self,
-                 d_model:int,
-                 posenc_drop_p:float=0,
-                 drop_p:float=0.1,
-                 max_len:int=1000,
-                 learnable:bool=False,
-                 pad_pos_skip:bool=False):
-        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
-        self.pad_pos_skip = pad_pos_skip
-
-        pe = 0.1*math.sqrt(max_len/d_model)*torch.randn(max_len,d_model)
-        if learnable: self.pe = torch.nn.Parameter(pe)
-        else: self.register_buffer('pe', pe)
-
-        if pad_pos_skip:
-            self.forward = self.skip_rand_forward
-        else:
-            self.forward = self.rand_forward
-
-class SinPositionalEncoding(PositionalEncoding):
-    def __init__(self,
-                 d_model:int,
-                 posenc_drop_p:float=0,
-                 drop_p:float=0.1,
-                 max_len:int=1000,
-                 learnable:bool=False,
-                 pad_pos_skip:bool=False):
-        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
-        self.pad_pos_skip = pad_pos_skip
-
-        position = torch.arange(max_len).unsqueeze(1)
-        scale = (-math.log(10000.0) / d_model)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        if learnable: self.pe = torch.nn.Parameter(pe)
-        else: self.register_buffer('pe', pe)
-
-        if pad_pos_skip:
-            self.forward = self.skip_vanil_forward
-        else:
-            self.forward = self.vanil_forward
-
-
-class RandSinPositionalEncoding(SinPositionalEncoding):
-    def __init__(self,*args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.pad_pos_skip:
-            self.forward = self.skip_rand_forward
-        else:
-            self.forward = self.rand_forward
 
 
 class LossWrapper(torch.nn.Module):
@@ -2318,7 +1986,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    #model = globals()[config.get("model_type","PKVTransformer")](**config)
-    model = globals()[config.get("model_type","GRU")](**config)
+    model = globals()[config.get("model_type","Transformer")](**config)
+    #model = globals()[config.get("model_type","GRU")](**config)
     return LossWrapper(model=model, config=config, **config)
 

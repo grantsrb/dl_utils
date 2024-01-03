@@ -11,14 +11,36 @@ from .utils import (
     get_full_cross_mask,
 )
 
-from transformers import LlamaModel
-from transformers.modeling_outputs import BaseModelOutputWithPast
 try:
     from transformers.modeling_attn_mask_utils import (
         _prepare_4d_causal_attention_mask
     )
 except:
     print("Failed to import causal attention mask util")
+
+try:
+    from transformers import LlamaModel
+    from transformers.modeling_outputs import BaseModelOutputWithPast
+except:
+    class LlamaModel(nn.Module):
+        """
+        Hacky way to avoid needing import
+        """
+        def __init__(self,):
+            super().__init__()
+
+    class BaseModelOutputWithPast:
+        def __init__(self, 
+            last_hidden_state=None,
+            past_key_values=None,
+            hidden_states=None,):
+            """
+            Hacky way to avoid needing import
+            """
+            self.last_hidden_state = last_hidden_state
+            self.past_key_values = past_key_values
+            self.hidden_states = hidden_states
+
 from torch import Tensor
 from typing import List, Optional, Tuple, Union
 
@@ -776,6 +798,373 @@ class FlexibleLlamaModel(LlamaModel):
             attentions=all_self_attns,
         )
 
+class RotaryEmbedding(nn.Module):
+    """
+    Repurposed from: https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/transformers/rope/__init__.py
+    """
+    def __init__(self, d: int, base: int=10000):
+        """
+        Args:
+            d: int
+                the dimensionality of the projected queries or keys.
+            base: int
+        """
+        super().__init__()
+        self.d = d
+        self.base = base
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def _build_cache(self, x: torch.tensor, offset=0):
+        """
+        Args:
+            x: torch Tensor (B,NHeads,Seq,D)
+            offset: int
+                an value to effectively increase the position of x in
+                the sequence. This is helpful for using past_key_values
+        """
+        s = x.shape[-2]+offset
+        if self.cos_cached is not None and s <= self.cos_cached.shape[0]:
+            return
+
+        denom = self.base ** (torch.arange(0, self.d, 2).float() / self.d)
+        theta = 1. / denom.to(x.device)
+
+        seq_idx = torch.arange(s, device=x.device).float()
+
+        idx_theta = torch.einsum("n,d->nd", seq_idx, theta)
+
+        idx_theta = torch.cat([idx_theta,idx_theta],dim=1)
+
+        self.cos_cached = idx_theta.cos()
+        self.sin_cached = idx_theta.sin()
+
+    def neg_half(self, x:torch.Tensor):
+        """
+        Args:
+            x: torch Tensor (B,NHeads,Seq,D)
+        """
+        d_2 = self.d//2
+        return torch.cat([-x[...,d_2:], x[...,:d_2]], dim=-1)
+
+    def forward(self, x: torch.tensor, offset=0):
+        """
+        Args:
+            x: torch Tensor (B,NHeads,Seq,D)
+        Returns:
+            x_rope: torch Tensor (B,NHeads,Seq,D)
+        """
+        B,N,S,D = x.shape
+        self._build_cache(x, offset=offset)
+        x_pass = None
+        x_rope = x
+        if self.d<x.shape[-1]:
+            x_rope, x_pass = x[..., :self.d], x[...,self.d:]
+        neg_half_x = self.neg_half(x_rope)
+        x_rope = (x_rope*self.cos_cached[offset:S+offset])
+        x_rope = x_rope + (neg_half_x*self.sin_cached[offset:S+offset])
+        if x_pass is not None:
+            x_rope = torch.cat([x_rope, x_pass],dim=-1)
+        return x_rope
+
+
+class RotaryAttention(nn.Module):
+    def __init__(self, 
+            d_model,
+            nhead,
+            kdim=None,
+            vdim=None,
+            dropout=0.1,
+            bias=True,
+            batch_first=True,
+            #use_xpos=True,
+            *args, **kwargs):
+        """
+        A multiheaded self-attention module that uses rotary encodings.
+
+        Args:
+            d_model: int
+            nhead: int
+            dropout: float
+            bias: bool
+            batch_first: bool
+            kdim: int
+                the incoming dimensionality of the keys
+            vdim: int
+                the incoming dimensionality of the values
+            #use_xpos: bool
+            #    augments the rotary embeddings to extrapolate better
+            #    to unseen sequence lengths
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.batch_first = batch_first
+        self.dropout = dropout
+
+        self.proj_dim = d_model//nhead
+
+        if kdim is None:
+            kdim = d_model
+        self.kdim = kdim
+        if vdim is None:
+            vdim = d_model
+        self.vdim = vdim
+
+        if not batch_first:
+            raise NotImplemented
+
+        self.q_proj = nn.Linear(
+            self.d_model, self.proj_dim*nhead, bias=bias)
+        self.k_proj = nn.Linear(
+            self.kdim, self.proj_dim*nhead, bias=bias)
+        self.v_proj = nn.Linear(
+            self.vdim, self.proj_dim*nhead, bias=bias)
+        self.out_proj = nn.Linear(
+            self.proj_dim*nhead, self.d_model, bias=bias)
+        self.init_weights()
+
+        self.rotary_emb = RotaryEmbedding(d=self.proj_dim)
+
+    def init_weights(self,):
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+
+    def forward(self,
+            q,k,v,
+            attn_mask=None,
+            is_causal=False,
+            past_key_value=None,
+            use_cache=False,
+            *args,**kwargs):
+        """
+        Args:
+            q: torch float tensor (B,L,D)
+            k: torch float tensor (B,S,K)
+            v: torch float tensor (B,S,V)
+            attn_mask: torch bool tensor (B,L,S)
+                true values denote attended values. Ideally do not
+                argue a float tensor, but if you do, the tensor will
+                be added to the attention score. Thus -inf should be
+                at unattended locations.
+            is_causal: bool
+                optionally apply a causal mask without arguing a mask.
+                will error if mask is not None and this is true.
+            past_key_values: optional, tuple of tensors
+                the indices will refer to the following (key or value,
+                batch, head, seq, size).
+            use_cache: bool
+                if true, will return new past_key_values
+        Returns:
+            ret_dict:
+                "output": torch tensor (B,L,D)
+                    the output of the multihead attention operation
+                "past_key_value": tuple of tensors
+                    the 0 index refers to the key calculations after
+                    the projection before the rotary embedding. It will
+                    have shape (B,N,T,P) where T is the sequence dim.
+                    The 1 index is similar but refers to the past values.
+        """
+        ret_dict = dict()
+        N,P = self.nhead, self.proj_dim
+        B,L,D = q.shape
+        B,S,K = k.shape
+        B,S,V = v.shape
+
+        k = self.k_proj(k).reshape(B,S,N,P).permute(0,2,1,3)
+        v = self.v_proj(v).reshape(B,S,N,P).permute(0,2,1,3)
+
+        if past_key_value is not None:
+            # Assumes past_key_value = k or v; (B,N,S1,P)
+            k = torch.cat([past_key_value[0],k],dim=-2)
+            v = torch.cat([past_key_value[1],v],dim=-2)
+            B,N,S,P = k.shape
+            B,N,S,P = v.shape
+        if use_cache:
+            ret_dict["past_key_value"] = (k,v)
+
+
+        if attn_mask is not None:
+            if len(attn_mask.shape)==3:
+                if attn_mask.shape[0]!=B:
+                    attn_mask = attn_mask.reshape(B,N,L,S)
+                else:
+                    attn_mask = attn_mask[:,None].repeat((1,N,1,1))
+
+        q = self.q_proj(q).reshape(B,L,N,P).permute(0,2,1,3)
+
+        offset = k.shape[-2]-1 if k.shape[-2]!=q.shape[-2] else 0
+        q = self.rotary_emb(q, offset=offset)
+        k = self.rotary_emb(k)
+
+        attn_out = F.scaled_dot_product_attention(
+            query=q,key=k,value=v,attn_mask=attn_mask,is_causal=is_causal)
+        ret_dict["output"] = self.out_proj(
+            attn_out.permute(0,2,1,3).reshape(B,L,N*P))
+        return ret_dict
+
+class RotaryEncoderLayer(nn.Module):
+    """
+    A custom rotary transformer encoder layer.
+    """
+    def __init__(self,
+            d_model,
+            nhead=4,
+            dim_feedforward=2048,
+            dropout=0.1,
+            activation=F.relu,
+            batch_first=True,
+            norm_first=True,
+            bias=True,
+            rot_dim=32,
+            layer_norm_eps=1e-5,
+            device=None,
+            dtype=None,
+            *args, **kwargs):
+        """
+        Args:
+            d_model: int
+            nhead: int
+            dropout: float
+            bias: bool
+            batch_first: bool
+            rot_dim: int
+                kdim must be divisible by rot_dim
+        """
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.self_attn = RotaryAttention(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            bias=bias,
+            batch_first=batch_first,
+            rot_dim=rot_dim,
+            **factory_kwargs,)
+
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(
+            d_model, dim_feedforward, bias=bias, **factory_kwargs)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(
+            dim_feedforward, d_model, bias=bias, **factory_kwargs)
+
+        self.norm_first = norm_first
+        self.norm1 = nn.LayerNorm(
+            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+        self.norm2 = nn.LayerNorm(
+            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.activation = activation
+
+    def _ff_block(self, x: Tensor) -> Tensor:
+        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        return self.dropout2(x)
+
+    # self-attention block
+    def _ma_block(self, q: Tensor, kv: Tensor,
+                  attn_mask: Optional[Tensor],
+                  is_causal: bool = False,
+                  past_key_value=None,
+                  use_cache=False) -> Tensor:
+        """
+        Args:
+            q: torch tensor (B,L,D)
+            kv: torch tensor (B,S,D)
+            mask: torch bool tensor (B,L,S)
+                true values denote attended values. Ideally do not
+                argue a float tensor, but if you do, the tensor will
+                be added to the attention score. Thus -inf should be
+                at unattended locations.
+            is_causal: bool
+                optionally apply a causal mask without arguing a mask.
+                will error if mask is not None and this is true.
+            past_key_values: optional, tuple of tensors
+                the indices will refer to the following (key or value,
+                batch, head, seq, size).
+            use_cache: bool
+                if true, will return new past_key_values
+        """
+        ret_dict = self.self_attn(q, kv, kv,
+                           attn_mask=attn_mask,
+                           is_causal=is_causal,
+                           past_key_value=past_key_value,
+                           use_cache=use_cache)
+        ret_dict["output"] = self.dropout1(ret_dict["output"])
+        return ret_dict
+
+    def forward(self,
+            src: Tensor,
+            src_mask: Optional[Tensor] = None,
+            src_key_padding_mask: Optional[Tensor] = None,
+            is_causal: bool = False,
+            past_key_value: tuple=None,
+            use_cache: bool=False,) -> Tensor:
+        r"""Pass the input through the encoder layer.
+
+        Args:
+            src: torch tensor (B,S,E)
+            src_mask: the mask for the src sequence (optional).
+                true/1s mean do attend
+            src_key_padding_mask: the mask for the src keys per batch (optional).
+                true/1s mean do attend
+            is_causal: If specified, applies a causal mask as ``src mask``.
+                Default: ``False``.
+                Warning:
+                ``is_causal`` provides a hint that ``src_mask`` is the
+                causal mask. Providing incorrect hints can result in
+                incorrect execution, including forward and backward
+                compatibility.
+            past_key_value: tensor (B,S,...) or None
+                if using caching, can argue a tensor here. It should
+                be the hidden states fed into this layer from the
+                previous step.
+            use_cache: bool
+                if true, will return the intermediate key_value
+                computations.
+        Returns:
+            fx: torch Tensor
+        """
+        ret_dict = dict()
+        if src_mask is not None:
+            #src_mask = ~src_mask
+            if src_mask.shape[1]!=src.shape[1]:
+                src_mask = src_mask[:,-src.shape[1]:]
+        if src_key_padding_mask is not None:
+            raise NotImplemented
+            src_key_padding_mask = ~src_key_padding_mask
+
+        x = src
+        if self.norm_first:
+            x = self.norm1(x)
+            attn_ret = self._ma_block(
+                q=x,
+                kv=x,
+                attn_mask=src_mask,
+                is_causal=is_causal,
+                past_key_value=past_key_value,
+                use_cache=use_cache,)
+            x = x + self._ff_block(self.norm2(x + attn_ret["output"]))
+        else:
+            attn_ret = self._ma_block(
+                q=x,
+                kv=x,
+                attn_mask=src_mask,
+                is_causal=is_causal,
+                past_key_value=past_key_value,
+                use_cache=use_cache,)
+            x = self.norm2(
+                x + self._ff_block(self.norm1(x + attn_ret["output"])))
+        if use_cache:
+            ret_dict["past_key_value"] = attn_ret["past_key_value"]
+        ret_dict["hidden_states"] = x
+        return ret_dict
+
+
 class PKVEncoderLayer(nn.TransformerEncoderLayer):
     """
     A custom transformer encoder layer using PyTorch's MultiHeadAttention
@@ -783,21 +1172,6 @@ class PKVEncoderLayer(nn.TransformerEncoderLayer):
     intermediate computations while maintaining a great degree of
     flexibility over the architecture.
     """
-    #def __init__(self, *args, add_zero_attn=False, **kwargs):
-    #    super().__init__(*args, **kwargs)
-    #    factory_kwargs = {
-    #        "device": kwargs.get("device", None),
-    #        "dtype": kwargs.get("dtype", None),}
-    #    self.self_attn = nn.MultiheadAttention(
-    #        embed_dim=kwargs["d_model"],
-    #        num_heads=kwargs["nhead"],
-    #        dropout=kwargs.get("dropout", 0.1),
-    #        bias=kwargs.get("bias",True),
-    #        batch_first=kwargs.get("batch_first", False),
-    #        add_zero_attn=add_zero_attn,
-    #        **factory_kwargs)
-
-    # self-attention block
     def _ma_block(self, q: Tensor, kv: Tensor,
                   attn_mask: Optional[Tensor],
                   key_padding_mask: Optional[Tensor],
@@ -902,6 +1276,165 @@ def print_tensor(t, n_tab=0):
         for tt in t:
             print_tensor(tt, n_tab=n_tab+1)
             print()
+
+class IdentityPositionalEncoding(nn.Module):
+    def __init__(self,
+                 drop_p:float=0,
+                 *args, **kwargs):
+        super().__init__()
+        self.dropout = nn.Dropout(p=drop_p)
+
+    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+        """
+        x = self.dropout( x )
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(self,
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
+                 max_len:int=1000):
+        super().__init__()
+        self.posenc_dropout = nn.Dropout(p=posenc_drop_p)
+        self.dropout = nn.Dropout(p=drop_p)
+        self.arange = np.arange(max_len).astype("int")
+
+    def rand_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+        """
+        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
+        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
+        x = self.dropout( x + self.posenc_dropout(self.pe[idxs]) )
+        return x
+
+    def skip_rand_forward(
+            self,
+            x: Tensor,
+            mask: Tensor,
+            *args,
+            **kwargs
+        ) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            mask: Tensor, shape ``[batch_size, seq_len]``
+                pad mask. true values represent padding/blotching
+        """
+        if mask is None: return self.rand_forward(x)
+        # pe: N, E
+        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
+        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
+        pe = self.posenc_dropout(self.pe[idxs])
+
+        sums = (~mask).float().sum(-1)
+        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
+        fx = torch.zeros_like(x)
+        fx[~mask] += pe[idxs]
+        fx = x + fx
+
+        return self.dropout( fx )
+
+    def vanil_forward(self,
+                      x: Tensor,
+                      pids: Tensor=None,
+                      *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            pids: LongTensor (B,S)
+        """
+        if pids is not None:
+            shape = [s for s in pids.shape] + [self.pe.shape[-1]]
+            posencs = self.pe[pids.reshape(-1)].reshape(shape)
+        else:
+            posencs = self.pe
+        x = self.dropout( x + self.posenc_dropout(posencs[:x.size(1)]) )
+        return x
+
+    def skip_vanil_forward(
+            self,
+            x: Tensor,
+            mask: Tensor,
+            *args,
+            **kwargs
+        ) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            mask: Tensor, shape ``[batch_size, seq_len]``
+                pad mask. true values represent padding/blotching
+        """
+        if mask is None: return self.vanil_forward(x)
+        pe = self.posenc_dropout(self.pe[:x.size(1)])
+
+        sums = torch.sum((~mask).float(), -1)
+        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
+        fx = torch.zeros_like(x)
+        fx[~mask] += pe[idxs]
+        fx = x + fx
+
+        return self.dropout( fx )
+
+class RandPositionalEncoding(PositionalEncoding):
+    def __init__(self,
+                 d_model:int,
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False,
+                 pad_pos_skip:bool=False):
+        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
+        self.pad_pos_skip = pad_pos_skip
+
+        pe = 0.1*math.sqrt(max_len/d_model)*torch.randn(max_len,d_model)
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
+
+        if pad_pos_skip:
+            self.forward = self.skip_rand_forward
+        else:
+            self.forward = self.rand_forward
+
+class SinPositionalEncoding(PositionalEncoding):
+    def __init__(self,
+                 d_model:int,
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False,
+                 pad_pos_skip:bool=False):
+        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
+        self.pad_pos_skip = pad_pos_skip
+
+        position = torch.arange(max_len).unsqueeze(1)
+        scale = (-math.log(10000.0) / d_model)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
+
+        if pad_pos_skip:
+            self.forward = self.skip_vanil_forward
+        else:
+            self.forward = self.vanil_forward
+
+
+class RandSinPositionalEncoding(SinPositionalEncoding):
+    def __init__(self,*args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.pad_pos_skip:
+            self.forward = self.skip_rand_forward
+        else:
+            self.forward = self.rand_forward
+
 
 if __name__=="__main__":
     for i in range(3):

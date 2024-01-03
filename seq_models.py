@@ -292,6 +292,7 @@ class SequenceModule(tmods.CoreModule):
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
                 temperature=temperature,
+                *args, **kwargs,
             )
         else:
             ret_dict = self.freedom_fwd(
@@ -305,6 +306,7 @@ class SequenceModule(tmods.CoreModule):
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
                 stop_ids=stop_ids,
+                *args, **kwargs,
             )
         return ret_dict
 
@@ -1029,8 +1031,8 @@ class Transformer(SequenceModule):
         # Masks
         if pad_mask is not None:
             pad_mask = ~(pad_mask.bool())
-            if pad_mask.shape[-1]<S+n_loops:
-                p = S+n_loops - pad_mask.shape[-1]
+            if pad_mask.shape[-1]<S+n_steps:
+                p = S+n_steps - pad_mask.shape[-1]
                 pad_mask = torch.nn.functional.pad(
                     pad_mask, (0, p), value=True
                 )
@@ -1042,8 +1044,7 @@ class Transformer(SequenceModule):
                 mask = torch.nn.functional.pad(
                     mask, (0, p, 0, p), value=True
                 )
-            # if pad_mask is not None:
-            #     pad_mask = padmask2attnmask(pad_mask)
+
         # Need to ensure the padding mask is the full length of the
         # past_key_values if past_key_values is not none
         p_end = S
@@ -1090,7 +1091,8 @@ class Transformer(SequenceModule):
             pred_ids[:,S+step+int(incl_all_inpts)] = argmaxs
             if step < n_loops-1:
                 inpt_emb = None
-                inpt = pred_ids[:,S+step:S+step+1]
+                s = S+step+int(incl_all_inpts)
+                inpt = pred_ids[:,s:s+1]
                 if stop_ids is not None and torch.isin(inpt, stop_ids):
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]

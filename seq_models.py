@@ -1079,7 +1079,6 @@ class Transformer(SequenceModule):
                 h_states.append(output.last_hidden_state)
             else:
                 h_states.append(output.last_hidden_state[:,-1:])
-            ## TODO: change FlexibleLlama model to output logits
             if not hasattr(output, "logits"):
                 state = h_states[-1][:,-1]
                 pred = self.lm_head(self.decoder(state))

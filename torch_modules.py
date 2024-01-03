@@ -807,10 +807,12 @@ class RotaryEmbedding(nn.Module):
         Args:
             d: int
                 the dimensionality of the projected queries or keys.
+                Must be divisible by 2.
             base: int
         """
         super().__init__()
         self.d = d
+        assert self.d%2==0
         self.base = base
         self.cos_cached = None
         self.sin_cached = None
@@ -1053,9 +1055,9 @@ class RotaryEncoderLayer(nn.Module):
 
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(
-            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+            d_model, eps=layer_norm_eps, **factory_kwargs)
         self.norm2 = nn.LayerNorm(
-            d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+            d_model, eps=layer_norm_eps, **factory_kwargs)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 

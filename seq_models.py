@@ -506,15 +506,15 @@ class RNN(SequenceModule):
             "hs": hs
         }
 
-class LinearRNN(SequenceModule):
-    def __init__(self, rnn_type="RNNCell", *args, **kwargs):
+class LinearRNN(RNN):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         d_hid = self.d_model*4
         modules = []
         modules.append(torch.nn.Linear( self.d_model, d_hid ))
         if self.l_norm:
             modules.append(torch.nn.LayerNorm(d_hid))
-        modules.append(torch.nn.Linear( d_hid, self.out_tokens ))
+        modules.append(torch.nn.Dropout(self.drop_p))
         self.decoder = torch.nn.Sequential( *modules )
 
 class GRU(RNN):
@@ -1987,7 +1987,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    model = globals()[config.get("model_type","Transformer")](**config)
-    #model = globals()[config.get("model_type","GRU")](**config)
+    #model = globals()[config.get("model_type","Transformer")](**config)
+    model = globals()[config.get("model_type","LinearRNN")](**config)
     return LossWrapper(model=model, config=config, **config)
 

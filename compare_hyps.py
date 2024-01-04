@@ -11,6 +11,12 @@ Prints:
 
 import json
 import sys
+import os
+if sum([int(f=="dl_utils") for f in os.listdir("./")])==0:
+    sys.path.append("../")
+else:
+    sys.path.append("./")
+import dl_utils
 
 if __name__=="__main__":
     data_list = []

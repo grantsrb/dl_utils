@@ -7,7 +7,7 @@ import numpy as np
 import dl_utils.torch_modules as tmods
 from .utils import (
     generate_square_subsequent_mask, arglast, top_k_acc,
-    update_shape, padmask2attnmask, get_causal_mask_like,
+    update_shape, padmask2attnmask
 )
 import math
 
@@ -210,6 +210,7 @@ class SequenceModule(tmods.CoreModule):
                       use_cache=False,
                       past_key_values=None,
                       stop_ids=None,
+                      output_attentions=False,
                       *args, **kwargs):
         """
         Arguments:
@@ -243,6 +244,8 @@ class SequenceModule(tmods.CoreModule):
                 a token that is contained within stop_ids. The resulting
                 return sequence will be the sequence including the stop
                 id
+            output_attentions: bool
+                if true, will return the unscaled attention weights
         Returns:
             ret_dict: dict
                 if tforce:
@@ -268,6 +271,7 @@ class SequenceModule(tmods.CoreModule):
                     ).bool().to( self.get_device() )
 
         #### TODO: DELETME
+        #Right now adding a custom mask for debugging purposes
         if mask is None:
             if inpts is None:
                 S = inputs_embeds.shape[1]
@@ -292,6 +296,7 @@ class SequenceModule(tmods.CoreModule):
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
                 temperature=temperature,
+                output_attentions=output_attentions,
                 *args, **kwargs,
             )
         else:
@@ -306,6 +311,7 @@ class SequenceModule(tmods.CoreModule):
                 inputs_embeds=inputs_embeds,
                 past_key_values=past_key_values,
                 stop_ids=stop_ids,
+                output_attentions=output_attentions,
                 *args, **kwargs,
             )
         return ret_dict
@@ -706,11 +712,13 @@ class Transformer(SequenceModule):
     model has a lower chance of becoming deprecated.
     """
     def __init__(self,
-                encoder_layer_class=tmods.RotaryEncoderLayer,
-                pos_enc_class=tmods.IdentityPositionalEncoding,
+                encoder_layer_class="RotaryEncoderLayer", # SimpleEncoderLayer
+                pos_enc_class="IdentityPositionalEncoding",
                 *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = 'Transformer'
+        encoder_layer_class = getattr(tmods, encoder_layer_class)
+        pos_enc_class = getattr(tmods, pos_enc_class)
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         self.pos_encs = pos_enc_class(
             d_model=self.d_model,
@@ -769,7 +777,7 @@ class Transformer(SequenceModule):
                 repeats=self.n_heads,
                 dim=0,
             )
-        return attn_mask
+        return attn_mask==0
 
     def encoder(self,
                 input_ids=None,
@@ -824,7 +832,6 @@ class Transformer(SequenceModule):
             attention_mask=attention_mask,
             pad_mask=pad_mask,
         )
-        attn_mask = attn_mask==0
         og_shape = attn_mask.shape
         attn_mask = attn_mask.reshape(-1,og_shape[-1])
         will_be_nan = attn_mask.long().sum(-1)==0
@@ -842,7 +849,7 @@ class Transformer(SequenceModule):
         next_cache = [] if use_cache else None
 
         all_hidden_states = []
-        attn_weights = []
+        attentions = []
         next_cache = []
         S = 0
         for i,layer in enumerate(self.layers):
@@ -853,10 +860,13 @@ class Transformer(SequenceModule):
                 src_mask=attn_mask,
                 past_key_value=past_key_value,
                 use_cache=use_cache,
+                output_attentions=output_attentions,
             )
             hidden_states = ret_dict["hidden_states"]
             if use_cache:
                 next_cache.append(ret_dict["past_key_value"])
+            if output_attentions:
+                attentions.append(ret_dict.get("attentions", None))
             hidden_states[torch.isnan(hidden_states)] = 0
             all_hidden_states.append(hidden_states)
         if use_cache:
@@ -868,6 +878,7 @@ class Transformer(SequenceModule):
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
+            attentions=attentions,
         )
 
     def tforce_fwd(self,
@@ -879,6 +890,7 @@ class Transformer(SequenceModule):
                    use_cache=False,
                    temperature=None,
                    hidden_states_only=False,
+                   output_attentions=False,
                    *args, **kwargs):
         """
         Arguments:
@@ -895,11 +907,14 @@ class Transformer(SequenceModule):
                 details
             hidden_states_only: bool
                 if true, will not bother computing the logits
+            output_attentions: bool
+                if true, will return the unscaled attention weights
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S)
                 "logits": torch FloatTensor (B,S,N)
                 "past_key_values": None or tuple of tuple of tensors
+                "attentions": None or tuple of tensors [(B,N,S,S)]
         """
         # flipped so that true means attend to
         attn_mask = None
@@ -916,12 +931,14 @@ class Transformer(SequenceModule):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             past_key_values=past_key_values,
+            output_attentions=output_attentions,
         )
         if hidden_states_only:
             return {
                 "last_hidden_state": output.last_hidden_state,
                 "past_key_values": getattr(output,"past_key_values",None),
                 "logits": getattr(output,"logits",None),
+                "attentions": getattr(output, "attentions", None),
             }
         if not hasattr(output, "logits"):
             og_shape = output.last_hidden_state.shape
@@ -938,6 +955,7 @@ class Transformer(SequenceModule):
             "logits": logits,
             "pred_ids": pred_ids,
             "past_key_values": getattr(output,"past_key_values",None),
+            "attentions": getattr(output, "attentions", None),
         }
 
     def freedom_fwd(self,
@@ -1788,6 +1806,7 @@ class LossWrapper(torch.nn.Module):
                 top_k=5,
                 reduce_metrics=True,
                 sprout_len=3,
+                output_attentions=False,
                 *args, **kwargs):
         """
         Args:
@@ -1828,6 +1847,8 @@ class LossWrapper(torch.nn.Module):
                 each token prediction
             sprout_len: int
                 the amount of seed text if using `tforce=False`
+            output_attentions: bool
+                if true, model will return scaled attention weights
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
                 "loss": torch tensor (1,) or (B,)
@@ -1878,6 +1899,7 @@ class LossWrapper(torch.nn.Module):
             tforce=tforce,
             n_steps=n_steps,
             temperature=temperature,
+            output_attentions=output_attentions,
         )
 
         ## Loss
@@ -1987,7 +2009,8 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    #model = globals()[config.get("model_type","Transformer")](**config)
-    model = globals()[config.get("model_type","LinearRNN")](**config)
+    config["encoder_layer_class"] = "SimpleEncoderLayer"
+    model = globals()[config.get("model_type","Transformer")](**config)
+    #model = globals()[config.get("model_type","LinearRNN")](**config)
     return LossWrapper(model=model, config=config, **config)
 

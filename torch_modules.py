@@ -33,7 +33,9 @@ except:
         def __init__(self, 
             last_hidden_state=None,
             past_key_values=None,
-            hidden_states=None,):
+            hidden_states=None,
+            attentions=None,
+            ):
             """
             Hacky way to avoid needing import
             """
@@ -800,7 +802,7 @@ class FlexibleLlamaModel(LlamaModel):
 
 class RotaryEmbedding(nn.Module):
     """
-    Repurposed from: https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/transformers/rope/__init__.py
+    Code for this module was slightly modified from: https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/transformers/rope/__init__.py
     """
     def __init__(self, d: int, base: int=10000):
         """
@@ -869,8 +871,7 @@ class RotaryEmbedding(nn.Module):
             x_rope = torch.cat([x_rope, x_pass],dim=-1)
         return x_rope
 
-
-class RotaryAttention(nn.Module):
+class MultiHeadAttention(nn.Module):
     def __init__(self, 
             d_model,
             nhead,
@@ -879,10 +880,10 @@ class RotaryAttention(nn.Module):
             dropout=0.1,
             bias=True,
             batch_first=True,
-            #use_xpos=True,
             *args, **kwargs):
         """
-        A multiheaded self-attention module that uses rotary encodings.
+        A multiheaded self-attention module that uses pytorch's
+        F.scaled_dot_product_attention function.
 
         Args:
             d_model: int
@@ -894,9 +895,6 @@ class RotaryAttention(nn.Module):
                 the incoming dimensionality of the keys
             vdim: int
                 the incoming dimensionality of the values
-            #use_xpos: bool
-            #    augments the rotary embeddings to extrapolate better
-            #    to unseen sequence lengths
         """
         super().__init__()
         self.d_model = d_model
@@ -926,13 +924,17 @@ class RotaryAttention(nn.Module):
             self.proj_dim*nhead, self.d_model, bias=bias)
         self.init_weights()
 
-        self.rotary_emb = RotaryEmbedding(d=self.proj_dim)
-
     def init_weights(self,):
         nn.init.xavier_uniform_(self.q_proj.weight)
         nn.init.xavier_uniform_(self.k_proj.weight)
         nn.init.xavier_uniform_(self.v_proj.weight)
         nn.init.xavier_uniform_(self.out_proj.weight)
+
+    def emb_fxn(self, q, k, *args, **kwargs):
+        """
+        Helpful abstraction function for relative/rotary encodings
+        """
+        return q, k
 
     def forward(self,
             q,k,v,
@@ -940,6 +942,7 @@ class RotaryAttention(nn.Module):
             is_causal=False,
             past_key_value=None,
             use_cache=False,
+            output_attentions=False,
             *args,**kwargs):
         """
         Args:
@@ -959,6 +962,8 @@ class RotaryAttention(nn.Module):
                 batch, head, seq, size).
             use_cache: bool
                 if true, will return new past_key_values
+            output_attentions: bool
+                if true, will return the unscaled attention weights.
         Returns:
             ret_dict:
                 "output": torch tensor (B,L,D)
@@ -968,6 +973,8 @@ class RotaryAttention(nn.Module):
                     the projection before the rotary embedding. It will
                     have shape (B,N,T,P) where T is the sequence dim.
                     The 1 index is similar but refers to the past values.
+                "attentions": (B,N,L,S)
+                    the unscaled attention weights
         """
         ret_dict = dict()
         N,P = self.nhead, self.proj_dim
@@ -987,8 +994,9 @@ class RotaryAttention(nn.Module):
         if use_cache:
             ret_dict["past_key_value"] = (k,v)
 
-
         if attn_mask is not None:
+            if attn_mask.dtype!=torch.bool:
+                attn_mask = attn_mask==0
             if len(attn_mask.shape)==3:
                 if attn_mask.shape[0]!=B:
                     attn_mask = attn_mask.reshape(B,N,L,S)
@@ -997,19 +1005,48 @@ class RotaryAttention(nn.Module):
 
         q = self.q_proj(q).reshape(B,L,N,P).permute(0,2,1,3)
 
-        offset = k.shape[-2]-1 if k.shape[-2]!=q.shape[-2] else 0
-        q = self.rotary_emb(q, offset=offset)
-        k = self.rotary_emb(k)
+        q,k = self.emb_fxn(q,k)
 
         attn_out = F.scaled_dot_product_attention(
             query=q,key=k,value=v,attn_mask=attn_mask,is_causal=is_causal)
+        if output_attentions:
+            scale = math.sqrt(k.shape[-1])
+            weights = torch.einsum("bnlp,bnsp->bnls", q,k)/scale
+            if attn_mask is not None:
+                weights = weights.masked_fill_(~attn_mask,float(-math.inf))
+            ret_dict["attentions"] = torch.softmax(weights, dim=-1)
         ret_dict["output"] = self.out_proj(
             attn_out.permute(0,2,1,3).reshape(B,L,N*P))
         return ret_dict
 
-class RotaryEncoderLayer(nn.Module):
+
+class RotaryAttention(MultiHeadAttention):
+    def __init__(self, rot_dim=None, *args, **kwargs):
+        """
+        A multiheaded self-attention module that uses rotary encodings.
+
+        Args:
+            see MultiHeadAttention for args and kwargs
+
+            rot_dim: int
+                the number of dimensions to use for the rotary encodings.
+                Must be divisible by 2 and must be less than or equal to
+                d_model//n_heads.
+        """
+        super().__init__(*args, **kwargs)
+        if rot_dim is None: rot_dim = self.proj_dim
+        self.rotary_emb = RotaryEmbedding(d=rot_dim)
+
+    def emb_fxn(self, q, k, *args, **kwargs):
+        offset = k.shape[-2]-1 if k.shape[-2]!=q.shape[-2] else 0
+        q = self.rotary_emb(q, offset=offset)
+        k = self.rotary_emb(k)
+        return q, k
+
+
+class SimpleEncoderLayer(nn.Module):
     """
-    A custom rotary transformer encoder layer.
+    A custom transformer encoder layer.
     """
     def __init__(self,
             d_model,
@@ -1020,7 +1057,6 @@ class RotaryEncoderLayer(nn.Module):
             batch_first=True,
             norm_first=True,
             bias=True,
-            rot_dim=32,
             layer_norm_eps=1e-5,
             device=None,
             dtype=None,
@@ -1032,18 +1068,15 @@ class RotaryEncoderLayer(nn.Module):
             dropout: float
             bias: bool
             batch_first: bool
-            rot_dim: int
-                kdim must be divisible by rot_dim
         """
         super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
-        self.self_attn = RotaryAttention(
+        self.self_attn = MultiHeadAttention(
             d_model=d_model,
             nhead=nhead,
             dropout=dropout,
             bias=bias,
             batch_first=batch_first,
-            rot_dim=rot_dim,
             **factory_kwargs,)
 
         # Implementation of Feedforward model
@@ -1072,7 +1105,8 @@ class RotaryEncoderLayer(nn.Module):
                   attn_mask: Optional[Tensor],
                   is_causal: bool = False,
                   past_key_value=None,
-                  use_cache=False) -> Tensor:
+                  use_cache=False,
+                  output_attentions=False) -> Tensor:
         """
         Args:
             q: torch tensor (B,L,D)
@@ -1090,12 +1124,15 @@ class RotaryEncoderLayer(nn.Module):
                 batch, head, seq, size).
             use_cache: bool
                 if true, will return new past_key_values
+            output_attentions: bool
+                if true, will return the unscaled attention weights
         """
         ret_dict = self.self_attn(q, kv, kv,
                            attn_mask=attn_mask,
                            is_causal=is_causal,
                            past_key_value=past_key_value,
-                           use_cache=use_cache)
+                           use_cache=use_cache,
+                           output_attentions=output_attentions)
         ret_dict["output"] = self.dropout1(ret_dict["output"])
         return ret_dict
 
@@ -1105,7 +1142,8 @@ class RotaryEncoderLayer(nn.Module):
             src_key_padding_mask: Optional[Tensor] = None,
             is_causal: bool = False,
             past_key_value: tuple=None,
-            use_cache: bool=False,) -> Tensor:
+            use_cache: bool=False,
+            output_attentions=False) -> Tensor:
         r"""Pass the input through the encoder layer.
 
         Args:
@@ -1128,8 +1166,19 @@ class RotaryEncoderLayer(nn.Module):
             use_cache: bool
                 if true, will return the intermediate key_value
                 computations.
+            output_attentions: bool
+                if true, will return the unscaled attention weights
         Returns:
-            fx: torch Tensor
+            ret_dict:
+                "output": torch tensor (B,L,D)
+                    the output of the multihead attention operation
+                "past_key_value": tuple of tensors
+                    the 0 index refers to the key calculations after
+                    the projection before the rotary embedding. It will
+                    have shape (B,N,T,P) where T is the sequence dim.
+                    The 1 index is similar but refers to the past values.
+                "attentions": (B,N,L,S)
+                    the unscaled attention weights
         """
         ret_dict = dict()
         if src_mask is not None:
@@ -1149,7 +1198,8 @@ class RotaryEncoderLayer(nn.Module):
                 attn_mask=src_mask,
                 is_causal=is_causal,
                 past_key_value=past_key_value,
-                use_cache=use_cache,)
+                use_cache=use_cache,
+                output_attentions=output_attentions,)
             x = x + self._ff_block(self.norm2(x + attn_ret["output"]))
         else:
             attn_ret = self._ma_block(
@@ -1158,13 +1208,40 @@ class RotaryEncoderLayer(nn.Module):
                 attn_mask=src_mask,
                 is_causal=is_causal,
                 past_key_value=past_key_value,
-                use_cache=use_cache,)
+                use_cache=use_cache,
+                output_attentions=output_attentions,)
             x = self.norm2(
                 x + self._ff_block(self.norm1(x + attn_ret["output"])))
         if use_cache:
             ret_dict["past_key_value"] = attn_ret["past_key_value"]
+        if output_attentions:
+            ret_dict["attentions"] = attn_ret["attentions"]
         ret_dict["hidden_states"] = x
         return ret_dict
+
+
+class RotaryEncoderLayer(SimpleEncoderLayer):
+    """
+    A custom rotary transformer encoder layer.
+    """
+    def __init__(self,
+            *args,
+            rot_dim=32,
+            **kwargs):
+        """
+        Args:
+            d_model: int
+            nhead: int
+            dropout: float
+            bias: bool
+            batch_first: bool
+            rot_dim: int
+                kdim must be divisible by rot_dim
+        """
+        super().__init__(*args, **kwargs)
+        self.self_attn = RotaryAttention(
+            rot_dim=rot_dim,
+            **kwargs,)
 
 
 class PKVEncoderLayer(nn.TransformerEncoderLayer):

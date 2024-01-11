@@ -346,11 +346,18 @@ def get_causal_mask_like(inpt: torch.Tensor):
     generates a causal mask where True denotes the unattended tokens.
 
     Args:
-        inpt: tensor (B,S) or (B,S,E)
+        inpt: tensor (...,S,L)
     Returns:
-        BoolTensor (1, inpt.shape[1],inpt.shape[1])
+        BoolTensor: (1,S,L)
     """
-    mask = generate_square_subsequent_mask(inpt.shape[1])
+    if len(inpt.shape)==2:
+        S = inpt.shape[-1]
+        L = S
+        mask = generate_square_subsequent_mask(S)
+    else:
+        S,L = inpt.shape[-2], inpt.shape[-1]
+        mask = generate_square_subsequent_mask(max(S,L))
+        mask = mask[:S,:L]
     device = inpt.get_device()
     if device<0: device = "cpu"
     return mask.to(device)[None]

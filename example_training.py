@@ -8,6 +8,11 @@ from tqdm import tqdm
 import os
 import sys
 import accelerate
+try:
+    import dl_utils
+except:
+    sys.path.append("./")
+    sys.path.append("../")
 
 from dl_utils.save_io import (
     save_checkpt, load_json_or_yaml, record_session, get_save_folder,
@@ -105,7 +110,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
     train_loader = dl_utils.training.empirical_batch_size(
         config, model, train_dataset
     )
-    if verbose:
+    if rank==0 and verbose:
         print("New Batch Size:", config["batch_size"])
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
@@ -116,6 +121,10 @@ def train(rank, config, verbose=True, *args, **kwargs):
         train_loader, val_loader = accelerator.prepare(
             train_loader, val_loader
         )
+        print("Warning! Accelerate may turn off data shuffling!")
+
+    if rank==0 and verbose:
+        print(model)
 
     #############################################################
     # Training

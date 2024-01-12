@@ -207,6 +207,7 @@ class SequenceModule(tmods.CoreModule):
                       n_steps:int=1,
                       temperature=None,
                       inputs_embeds:torch.Tensor=None,
+                      input_ids=None,
                       use_cache=False,
                       past_key_values=None,
                       stop_ids=None,
@@ -235,6 +236,8 @@ class SequenceModule(tmods.CoreModule):
                 token sampling. high temperature means high entropy
             inputs_embeds: None or FloatTensor (B,S,E)
                 optionally argue input embeddings instead of token ids.
+            input_ids: torch LongTensor (B,S)
+                optionally use different keyword
             past_key_values: tuple of tuple of tensors
                 if use_cache is true, will return saved computations
                 that can be argued on the next pass to save on
@@ -256,6 +259,8 @@ class SequenceModule(tmods.CoreModule):
                     "logits": torch FloatTensor (B,S+NSteps,NTokens)
                 "past_key_values": None or tuple of tuple of tensors
         """
+        if input_ids is not None:
+            inpts = input_ids
         if pad_mask is None:
             if past_key_values is None or past_key_values[0] is None:
                 if inpts is not None:
@@ -935,6 +940,7 @@ class Transformer(SequenceModule):
         )
         if hidden_states_only:
             return {
+                "hidden_states": output.hidden_states,
                 "last_hidden_state": output.last_hidden_state,
                 "past_key_values": getattr(output,"past_key_values",None),
                 "logits": getattr(output,"logits",None),
@@ -951,6 +957,7 @@ class Transformer(SequenceModule):
             logits, temperature
         )
         return {
+            "hidden_states": output.hidden_states,
             "last_hidden_state": output.last_hidden_state,
             "logits": logits,
             "pred_ids": pred_ids,

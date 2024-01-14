@@ -103,6 +103,13 @@ def get_checkpoints(folder, checkpt_exts={'p', 'pt', 'pth'}):
             path = os.path.join(folder,f)
             checkpts.append(path)
     def sort_key(x): return int(x.split(".")[-2].split("_")[-1])
+    filt_checkpts = []
+    for c in checkpts:
+        try:
+            sort_key(c)
+            filt_checkpts.append(c)
+        except: pass
+    checkpts = filt_checkpts
     checkpts = sorted(checkpts, key=sort_key)
     return checkpts
 

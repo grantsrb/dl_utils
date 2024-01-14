@@ -746,7 +746,7 @@ class Transformer(SequenceModule):
         self.init_weights()
 
     def prep_encoder_mask(self,
-            S,
+            S=None,
             attention_mask=None,
             pad_mask=None,
             is_causal=True,

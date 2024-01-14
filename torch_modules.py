@@ -634,6 +634,13 @@ class CrossAttentionPrep(nn.Module):
                 the sequence length of the first modality and S2 is the
                 sequence length of the 2nd modality. Only Long type masks
                 are supported.
+        Returns:
+            inpts:
+                the concatenated inputs
+            cross_mask: torch bool tensor (B,S1+S2,S1+S2)
+                true means unattended indices
+            pad_mask: torch bool tensor (B,S1+S2)
+                true means unattended, padding indices
         """
         ## TODO: QUESTION DECISION FOR MODE ENCODINGS. Cannot use freedom
         ## forward if using mode encodings with current setup.
@@ -641,7 +648,9 @@ class CrossAttentionPrep(nn.Module):
         #  inpt+self.mode_encodings[i] for i,inpt in enumerate(inpt_list)
         #]
 
-        inpts = torch.cat(inpt_list, dim=1) # (B,S1+S2,E)
+        if inpt_list is not None:
+            inpts = torch.cat(inpt_list, dim=1) # (B,S1+S2,E)
+        else: inpts = None
 
         # cross mask assumes true is padding
         # TODO: Need to be careful about step mask because we don't know
@@ -654,6 +663,7 @@ class CrossAttentionPrep(nn.Module):
                 (0,n_steps, 0,n_steps),
                 value=torch.max(step_masks[1])+1
             )
+        # returned cross mask has true as padded, non-atteneded idxs
         cross_mask = get_full_cross_mask(step_masks) # (B,S1+S2,S1+S2)
         pad_mask = torch.cat(pad_masks, dim=-1)# (B,S1+S2)
         #pad_mask = padmask2attnmask(pad_mask) # (B,S1+S2,S1+S2)

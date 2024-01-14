@@ -377,6 +377,7 @@ def generate_square_subsequent_mask(
         dtype: str ("bool" or "float")
     Returns:
         BoolTensor (sz,sz)
+            False values in lower left including the diagonal
     """
     if dtype=="float" or dtype==float:
         mask = torch.triu(

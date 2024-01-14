@@ -745,44 +745,60 @@ class Transformer(SequenceModule):
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
 
-    def combine_attn_masks(self,
-                sz=0,
-                attention_mask=None,
-                pad_mask=None):
+    def prep_encoder_mask(self,
+            S,
+            attention_mask=None,
+            pad_mask=None,
+            is_causal=True,
+        ):
         """
-        This function manually combines attention masks because pytorch
-        does it stupidly.
+        This function is the highest level of abstraction in this
+        class for manually combining attention masks.
 
         Args:
-            sz: int
+            S: int
+                size of the sequence length
             attention_mask: BoolTensor (B,S,S) or (S,S)
-                True values mean masked, not attended to indices
+                true values mean do attend to
             pad_mask: BoolTensor (B,S)
+                true values mean do attend to (false means padding ids)
+            is_causal: bool
+                if true, will apply a causal mask if `attention_mask`
+                is None.
+        Returns:
+            attn_mask: bool tensor
+                true values mean do attend to
         """
-        if attention_mask is None:
-            attn_mask = generate_square_subsequent_mask(
-                sz,
-                device=self.get_device(),
-                dtype="float"
-            )
-        else:
+        attn_mask = None
+        if attention_mask is not None:
             if attention_mask.dtype==torch.bool:
-                attention_mask = attention_mask.float().masked_fill_(
-                    attention_mask, float("-inf"))
-            attn_mask = attention_mask
+                attn_mask = attention_mask
+            else:
+                attn_mask = attention_mask==0
+        if attn_mask is None and is_causal:
+            attn_mask = generate_square_subsequent_mask(S)
+            attn_mask = ~attn_mask.to(self.get_device())
         if pad_mask is not None:
-            pad_mask = pad_mask.float().masked_fill_(
-                pad_mask,float("-inf"))
-            S = pad_mask.shape[1]
-            attn_mask = attn_mask + pad_mask[:,None].repeat((1,S,1))
-            attn_mask[(attn_mask==0).sum(-1)==0] = 0
+            pad_mask = pad_mask
+            if attn_mask is None:
+                attn_mask = pad_mask
+            else:
+                attn_mask = self.prep_mask(
+                    mask=~attn_mask,
+                    pad_mask=~pad_mask,)
         if len(attn_mask.shape)>2:
             attn_mask = torch.repeat_interleave(
                 input=attn_mask,
                 repeats=self.n_heads,
                 dim=0,
             )
-        return attn_mask==0
+        og_shape = attn_mask.shape
+        attn_mask = attn_mask.reshape(-1,og_shape[-1])
+        will_be_nan = attn_mask.long().sum(-1)==0
+        if torch.any(will_be_nan):
+            attn_mask[will_be_nan] = 1
+        attn_mask = attn_mask.reshape(og_shape)
+        return attn_mask
 
     def encoder(self,
                 input_ids=None,
@@ -793,6 +809,7 @@ class Transformer(SequenceModule):
                 inputs_embeds=None,
                 position_ids=None,
                 output_attentions=False,
+                is_causal=True,
                 *args, **kwargs):
         """
         Arguments:
@@ -825,24 +842,13 @@ class Transformer(SequenceModule):
             inputs_embeds = self.embeddings(input_ids)
         hidden_states = inputs_embeds
 
-        if attention_mask is not None:
-            if attention_mask.dtype==torch.bool:
-                attention_mask = ~attention_mask
-            else:
-                attention_mask = attention_mask==0
-        if pad_mask is not None:
-            pad_mask = ~pad_mask
-        attn_mask = self.combine_attn_masks(
-            sz=inputs_embeds.shape[1],
+        attn_mask = self.prep_encoder_mask(
+            S=inputs_embeds.shape[1],
             attention_mask=attention_mask,
             pad_mask=pad_mask,
+            is_causal=is_causal,
         )
-        og_shape = attn_mask.shape
-        attn_mask = attn_mask.reshape(-1,og_shape[-1])
-        will_be_nan = attn_mask.long().sum(-1)==0
-        if torch.any(will_be_nan):
-            attn_mask[will_be_nan] = 1
-        attn_mask = attn_mask.reshape(og_shape)
+
         if past_key_values is not None and position_ids is None:
             position_ids = torch.arange(
                 past_key_values[0][0].shape[-2],
@@ -886,6 +892,35 @@ class Transformer(SequenceModule):
             attentions=attentions,
         )
 
+    def prep_mask(self, mask=None,pad_mask=None):
+        """
+        This function should be applied before the encoder function to
+        allow reusability with Huggingface models. Assumes true means
+        padding/unattended locations.
+
+        Args:
+            mask: None or bool tensor
+                true means unattended locations
+            pad_mask: None or bool tensor
+                true means unattended locations
+        Returns:
+            attn_mask: bool tensor
+                true denotes attended locations. note that this is
+                flipped from the incoming arguments.
+        """
+        attn_mask = None
+        if pad_mask is not None:
+            if pad_mask.dtype==torch.bool: attn_mask = ~pad_mask
+            else: attn_mask = pad_mask==0
+        if mask is not None:
+            if mask.dtype==torch.bool: mask = ~mask
+            else: mask = mask==0
+            if attn_mask is not None:
+                attn_mask = padmask2attnmask(attn_mask)
+                attn_mask = attn_mask&mask
+            else: attn_mask = mask
+        return attn_mask
+
     def tforce_fwd(self,
                    inpts:torch.Tensor,
                    mask:torch.Tensor=None,
@@ -922,14 +957,7 @@ class Transformer(SequenceModule):
                 "attentions": None or tuple of tensors [(B,N,S,S)]
         """
         # flipped so that true means attend to
-        attn_mask = None
-        if pad_mask is not None:
-            attn_mask = ~(pad_mask.bool())
-        if mask is not None:
-            if attn_mask is not None:
-                attn_mask = padmask2attnmask(attn_mask)
-                attn_mask = attn_mask&~(mask.bool())
-            else: attn_mask = ~(mask.bool())
+        attn_mask = self.prep_mask(mask=mask, pad_mask=pad_mask)
         output = self.encoder(
             inpts,
             attention_mask=attn_mask,

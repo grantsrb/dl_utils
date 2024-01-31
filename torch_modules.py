@@ -1366,6 +1366,13 @@ def print_tensor(t, n_tab=0):
             print_tensor(tt, n_tab=n_tab+1)
             print()
 
+class IdentityModule(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        return x
+
 class IdentityPositionalEncoding(nn.Module):
     def __init__(self,
                  drop_p:float=0,

@@ -8,9 +8,13 @@ import numpy as np
 
 BEST_CHECKPT_NAME = "best_checkpt_0.pt.best"
 
-def save_checkpt(save_dict, save_folder, save_name, epoch, ext=".pt",
-                                                    del_prev_sd=True,
-                                                    best=False):
+def save_checkpt(save_dict,
+        save_folder,
+        epoch,
+        save_name="checkpt",
+        ext=".pt",
+        del_prev_sd=True,
+        best=False):
     """
     Saves a dictionary that contains a statedict
 

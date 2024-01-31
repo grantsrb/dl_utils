@@ -119,7 +119,7 @@ def foldersort(x):
     <path_to_folder>/<exp_name>_<exp_num>_<ending_folder_name>/
 
     Assumes that the experiment number will always be the rightmost
-    occurance ofan integer surrounded by underscores (i.e. _1_)
+    occurance of an integer surrounded by underscores (i.e. _1_)
 
     x: str
     """
@@ -154,6 +154,12 @@ def prep_search_keys(s):
         ).replace(
             "/", ""
         )
+
+def get_exp_num(path):
+    """
+    Finds and returns the experiment number from the argued path.
+    """
+    return foldersort(path)
 
 def is_model_folder(path, exp_name=None, incl_empty=True):
     """

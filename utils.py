@@ -556,6 +556,75 @@ def get_git_revision_hash():
             ['git', 'rev-parse', 'HEAD']
         ).decode('ascii').strip()
 
+def mtx_cor(X, Y, batch_size=500, to_numpy=False, zscore=True, device=None):
+    """
+    Creates a correlation matrix for X and Y using the GPU
+
+    X: torch tensor or ndarray (T, C) or (T, C, H, W)
+    Y: torch tensor or ndarray (T, K) or (T, K, H1, W1)
+    batch_size: int
+        batches the calculation if this is not None
+    to_numpy: bool
+        if true, returns matrix as ndarray
+    zscore: bool
+        if true, both X and Y are normalized over the T dimension
+    device: int
+        optionally argue a device to use for the matrix multiplications
+
+    Returns:
+        cor_mtx: (C,K) or (C*H*W, K*H1*W1)
+            the correlation matrix
+    """
+    if len(X.shape) < 2:
+        X = X[:,None]
+    if len(Y.shape) < 2:
+        Y = Y[:,None]
+    if len(X.shape) > 2:
+        X = X.reshape(len(X), -1)
+    if len(Y.shape) > 2:
+        Y = Y.reshape(len(Y), -1)
+    if type(X) == type(np.array([])):
+        to_numpy = True
+        X = torch.FloatTensor(X)
+        Y = torch.FloatTensor(Y)
+    if device is None:
+        device = X.get_device()
+        if device<0: device = "cpu"
+    if zscore:
+        xmean = X.mean(0)
+        xstd = torch.sqrt(((X-xmean)**2).mean(0))
+        ymean = Y.mean(0)
+        ystd = torch.sqrt(((Y-ymean)**2).mean(0))
+        xstd[xstd<=0] = 1
+        X = (X-xmean)/(xstd+1e-5)
+        ystd[ystd<=0] = 1
+        Y = (Y-ymean)/(ystd+1e-5)
+    X = X.permute(1,0)
+
+    with torch.no_grad():
+        if batch_size is None:
+            X = X.to(device)
+            Y = Y.to(device)
+            cor_mtx = torch.einsum("it,tj->ij", X, Y).detach().cpu()
+        else:
+            cor_mtx = []
+            for i in range(0,len(X),batch_size): # loop over x neurons
+                sub_mtx = []
+                x = X[i:i+batch_size].to(device)
+
+                # Loop over y neurons
+                for j in range(0,Y.shape[1], batch_size):
+                    y = Y[:,j:j+batch_size].to(device)
+                    cor_block = torch.einsum("it,tj->ij",x,y)
+                    cor_block = cor_block.detach().cpu()
+                    sub_mtx.append(cor_block)
+                cor_mtx.append(torch.cat(sub_mtx,dim=1))
+            cor_mtx = torch.cat(cor_mtx, dim=0)
+    cor_mtx = cor_mtx/len(Y)
+    if to_numpy:
+        return cor_mtx.numpy()
+    return cor_mtx
+
 
 if __name__=="__main__":
     step1 = torch.arange(5).long()

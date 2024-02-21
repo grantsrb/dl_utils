@@ -305,7 +305,7 @@ def get_mask_past_id(src, id_, incl_id=False):
     """
     return get_mask_past_ids(src, ids=id_)
 
-def get_mask_past_ids(src, ids, incl_id=False):
+def get_mask_past_ids(src, ids, incl_id=False, last_occurence=False):
     """
     Returns a mask in which ones denote all spaces after the first
     occurance of any of the values within `ids`.
@@ -316,6 +316,11 @@ def get_mask_past_ids(src, ids, incl_id=False):
         incl_id: bool
             optionally include the first occurance of the id in the
             mask.
+        last_occurence: bool
+            if true, will return the mask past the last occurence of the
+            argued id. Otherwise will return the mask after the first
+            occurence reading from left to right. Defaults to false
+            because this is less efficient.
     Returns:
         mask: bool tensor (B,S)
             true values denote indexes past (or including) the first
@@ -329,7 +334,8 @@ def get_mask_past_ids(src, ids, incl_id=False):
     ids = ids.to(device)
     B,S = src.shape
     is_id = torch.isin(src, ids).long()
-    id_idxs = torch.argmax(is_id, dim=-1)
+    if last_occurence: id_idxs = arglast(is_id, dim=-1)
+    else: id_idxs = torch.argmax(is_id, dim=-1)
     # if ids does not appear, then default idx is past last idx
     id_idxs[torch.sum(is_id,dim=-1)==0] = src.shape[-1]
     arange = torch.arange(S)[None].repeat((B,1)).long()
@@ -524,6 +530,30 @@ def get_full_cross_mask(step_masks):
     ],dim=1)
     return cross_mask
 
+def get_mask_between(shape, startx, endx):
+    """
+    Returns a binary mask that ranges from the start indices to the
+    end indices along the last axis. Excludes the indices argued in endx.
+
+    Args:
+        shape: tuple of ints
+            the shape of the resulting mask
+        startx: tensor (B,)
+            the starting indices. should have the same length as the
+            non-final dimensions of shape
+        endx: tensor (B,)
+            the ending indices. same shape as startx
+    Returns:
+        mask: bool tensor (shape)
+    """
+    arr = torch.arange(shape[-1])
+    reps = []
+    for _ in range(len(shape)-1):
+        arr = arr[None]
+    reps = tuple(list(shape[:-1])+[1])
+    arr = arr.repeat(reps)
+    return (arr>=startx[:,None])&(arr<endx[:,None])
+
 def package_versions(globals_dict=None, verbose=False):
     """
     Finds the versions of all packages used in this script
@@ -627,14 +657,11 @@ def mtx_cor(X, Y, batch_size=500, to_numpy=False, zscore=True, device=None):
 
 
 if __name__=="__main__":
-    step1 = torch.arange(5).long()
-    step2 = []
-    for i in range(5):
-        step2.append(i)
-        step2.append(i)
-        if torch.rand(1)>0.5: step2.append(i)
-    step2 = torch.LongTensor(step2)
-    print("Step1:\n", step1)
-    print("Step2:\n", step2)
-
-    print(get_full_cross_mask([step1[None],step2[None]]).long())
+    shape = (5,6)
+    for i in range(3):
+        startx = torch.randint(0,4,(5,))
+        endx = startx + torch.randint(1,4,(5,))
+        print("Strx:", startx)
+        print("Endx:", endx)
+        print(get_mask_between(shape, startx=startx, endx=endx+1).long())
+        print()

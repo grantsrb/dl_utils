@@ -530,6 +530,35 @@ def get_full_cross_mask(step_masks):
     ],dim=1)
     return cross_mask
 
+def get_mask_past_idx(shape, idx, inclusive=False):
+    """
+    Returns a binary mask past the argued indices in the idx vector
+    along the last axis.
+
+    Args:
+        shape: tuple of ints
+            the shape of the resulting mask
+        idx: tensor (B,)
+            the indices that mark the start of the mask
+    Returns:
+        mask: bool tensor (shape)
+            ones are at indices after the argued idx along the last dim
+    """
+    try:
+        arr = torch.arange(shape[-1])
+    except:
+        if hasattr(shape,"shape"): # probably argued a tensor on accident
+            shape = shape.shape
+            arr = torch.arange(shape[-1])
+        else: assert False
+    reps = []
+    for _ in range(len(shape)-1):
+        arr = arr[None]
+    reps = tuple(list(shape[:-1])+[1])
+    arr = arr.repeat(reps)
+    if inclusive: return arr>=idx[:,None]
+    return arr>idx[:,None]
+
 def get_mask_between(shape, startx, endx):
     """
     Returns a binary mask that ranges from the start indices to the

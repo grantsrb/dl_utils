@@ -544,6 +544,8 @@ def get_mask_past_idx(shape, idx, inclusive=False):
         mask: bool tensor (shape)
             ones are at indices after the argued idx along the last dim
     """
+    device = idx.get_device()
+    if device<0: device = "cpu"
     try:
         arr = torch.arange(shape[-1])
     except:
@@ -555,7 +557,7 @@ def get_mask_past_idx(shape, idx, inclusive=False):
     for _ in range(len(shape)-1):
         arr = arr[None]
     reps = tuple(list(shape[:-1])+[1])
-    arr = arr.repeat(reps)
+    arr = arr.repeat(reps).to(device)
     if inclusive: return arr>=idx[:,None]
     return arr>idx[:,None]
 

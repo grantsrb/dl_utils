@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime
 try:
     import cv2
+    from tqdm import tqdm
 except:
     pass
 
@@ -685,6 +686,286 @@ def mtx_cor(X, Y, batch_size=500, to_numpy=False, zscore=True, device=None):
     if to_numpy:
         return cor_mtx.numpy()
     return cor_mtx
+
+def requires_grad(model, state):
+    """
+    Turns grad calculations on and off for all parameters in the model
+
+    model: torch Module
+    state: bool
+        if true, gradient calculations are performed
+        if false, gradient calculations are not
+    """
+    for p in model.parameters():
+        try:
+            p.requires_grad = state
+        except:
+            pass
+
+def get_hook(key, layer_dict=None, to_numpy=True, to_cpu=False):
+    """
+    Returns a hook function that can be used to collect gradients
+    or activations in the backward or forward pass respectively of
+    a torch Module.
+
+    key: str
+        name of layer of interest
+    layer_dict: dict
+        Can be empty
+        keys: str
+            names of model layers of interest
+        vals: NA
+    to_numpy: bool
+        if true, the gradients/activations are returned as ndarrays.
+        otherwise they are returned as torch tensors
+    """
+    if layer_dict is None: layer_dict = dict()
+    if to_numpy:
+        def hook(module, inp, out):
+            layer_dict[key] = out.detach().cpu().numpy()
+    elif to_cpu:
+        def hook(module, inp, out):
+            layer_dict[key] = out.cpu()
+    else:
+        def hook(module, inp, out):
+            layer_dict[key] = out
+    return hook, layer_dict
+
+def inspect(model, X, insp_keys=set(), batch_size=500, to_numpy=True,
+                                                       to_cpu=True,
+                                                       no_grad=False,
+                                                       verbose=False):
+    """
+    Get the response from the argued layers in the model as np arrays.
+    If model is on cpu, operations are performed on cpu. Put model on
+    gpu if you want operations to be performed on gpu.
+
+    Args:
+        model - torch Module or torch gpu Module
+        X - ndarray or FloatTensor (T,C,H,W)
+        insp_keys - set of str
+            name of layers activations to collect. if empty set, only
+            the final output is returned.
+        to_numpy - bool
+            if true, activations will all be ndarrays. Otherwise torch
+            tensors
+        to_cpu - bool
+            if true, torch tensors will be on the cpu.
+            only effective if to_numpy is false.
+        no_grad: bool
+            if true, gradients will not be calculated. if false, has
+            no impact on function.
+
+    returns: 
+        layer_outs: dict of np arrays or torch cpu tensors
+            Each inspection key will have a key in this dict with a key
+            of the activations at the inspected layer. Also, the output
+            layer will be included under the name "outputs".
+            Keys:
+                "outputs": default key for output layer
+                "<insp_key_i>": output at layer <insp_key_i>
+    """
+    layer_outs = dict()
+    handles = []
+    insp_keys_copy = set()
+    for key, mod in model.named_modules():
+        if key in insp_keys:
+            insp_keys_copy.add(key)
+            hook, _ = get_hook(
+                key,
+                layer_dict=layer_outs,
+                to_numpy=to_numpy,
+                to_cpu=to_cpu)
+            handle = mod.register_forward_hook(hook)
+            handles.append(handle)
+    set_insp_keys = set(insp_keys)
+    if len(set_insp_keys-insp_keys_copy) > 0 and "outputs" not in set_insp_keys:
+        print("Insp keys:", set_insp_keys-insp_keys_copy, "not found")
+    insp_keys = insp_keys_copy
+    if not isinstance(X,torch.Tensor):
+        X = torch.FloatTensor(X)
+
+    # prev_grad_state is used to ensure we do not mess with an outer
+    # "with torch.no_grad():" statement
+    prev_grad_state = torch.is_grad_enabled() 
+    if to_numpy or no_grad:
+        # Turns off all gradient calculations. When returning numpy
+        # arrays, the computation graph is inaccessible, as such we
+        # do not need to calculate it.
+        torch.set_grad_enabled(False)
+
+    device = device_fxn(next(model.parameters()).get_device())
+    try:
+        if batch_size is None or batch_size > len(X):
+            preds = model(X.to(device))
+            if to_numpy:
+                layer_outs['outputs'] = preds.detach().cpu().numpy()
+            else:
+                layer_outs['outputs'] = preds.cpu()
+        else:
+            batched_outs = {key:[] for key in insp_keys}
+            outputs = []
+            rnge = range(0,len(X), batch_size)
+            if verbose:
+                rnge = tqdm(rnge)
+            for batch in rnge:
+                x = X[batch:batch+batch_size]
+                preds = model(x.to(device)).cpu()
+                if to_numpy: preds = preds.detach().numpy()
+                outputs.append(preds)
+                for k in layer_outs.keys():
+                    batched_outs[k].append(layer_outs[k])
+                    layer_outs[k] = None
+            batched_outs['outputs'] = outputs
+            if to_numpy:
+                layer_outs = {k:np.concatenate(v,axis=0) for k,v in\
+                                               batched_outs.items()}
+            else:
+                layer_outs = {k:torch.cat(v,dim=0) for k,v in\
+                                         batched_outs.items()}
+    except RuntimeError as e:
+        print("Runtime error. Check your batch size and try using",
+                "inspect with torch.no_grad() enabled")
+        raise RuntimeError(str(e))
+
+        
+    # If we turned off the grad state, this will turn it back on.
+    # Otherwise leaves it the same.
+    torch.set_grad_enabled(prev_grad_state) 
+
+    # This for loop ensures we do not create a memory leak when
+    # using hooks
+    for i in range(len(handles)):
+        handles[i].remove()
+    del handles
+    return layer_outs
+
+def integrated_gradient(
+        model, X, layer,
+        intg_shape=None,
+        output_units=None,
+        alpha_steps=10,
+        batch_size=500,
+        y=None,
+        lossfxn=None,
+        to_numpy=False,
+        verbose=False):
+    """
+    Returns the integrated gradient for a particular stimulus at the
+    argued layer. This function always operates with the model in
+    eval mode due to the need for a deterministic model. If the model
+    is argued in train mode, it is set to eval mode for this function
+    and returned to train mode at the end of the function. As such,
+    this note is largely irrelavant, but will hopefully satisfy the
+    curious or anxious ;)
+
+    Inputs:
+        model: PyTorch Module
+        X: Input stimuli ndarray or torch FloatTensor (T,D,H,W)
+        layer: str layer name
+        intg_shape: None or tuple of ints
+            the shape of the integrated gradient ignoring the batch dim.
+        output_units: int or list of ints or None
+            the indices of the output units of interest. if None, uses
+            sum of all output units as function to differentiate.
+        alpha_steps: int, integration steps
+        batch_size: step size when performing computations on GPU
+        y: torch FloatTensor or ndarray (T,N)
+            if None, ignored
+        lossfxn: some differentiable function
+            if None, ignored
+    Outputs:
+        intg_grad: ndarray or FloatTensor (T, D) or (T, *intg_shape)
+            integrated gradient
+        gc_activs: ndarray or FloatTensor (T,N)
+            activation of the final layer of the model
+    """
+    raise NotImplemented # UNTESTED CODE AT THIS POINT
+
+    # Handle Gradient Settings
+    # Model gradient unnecessary for integrated gradient
+    requires_grad(model, False)
+
+    # Save current grad calculation state
+    prev_grad_state = torch.is_grad_enabled()
+    torch.set_grad_enabled(True) # Enable grad calculations
+    prev_train_state = model.training
+    model.eval()
+
+    if intg_shape is None or output_units is None:
+        output = inspect(model, X[:1], insp_keys=[layer],
+                                           batch_size=None,
+                                           to_cpu=True,
+                                           no_grad=True,
+                                           verbose=False)
+        if intg_shape is None: intg_shape = output[layer].shape[1:]
+        if output_units is None:
+            n_units = output["output"].reshape(1,-1).shape[-1]
+            output_units = list(range(n_units))
+    intg_grad = torch.zeros(len(X), *intg_shape)
+    if isinstance(output_units,int): output_units = [output_units]
+    out_logits = None
+
+
+    if batch_size is None: batch_size = len(X)
+    if not isinstance(X, torch.Tensor): X = torch.FloatTensor(X)
+    X.requires_grad = True
+    idxs = torch.arange(len(X)).long()
+    n_loops = int(np.ceil(len(X)/batch_size))
+    for batch in range(n_loops):
+        prev_response = None
+        linspace = torch.linspace(0,1,alpha_steps)
+        if verbose:
+            print("Calculating for batch {}/{}".format(batch, len(X)))
+            linspace = tqdm(linspace)
+        idx = idxs[batch*batch_size:(batch+1)*batch_size]
+        for alpha in linspace:
+            x = alpha*X[idx]
+            # Response is dict of activations. response[layer] has
+            # shape intg_grad.shape
+            response = inspect(model, x, insp_keys=[layer],
+                                           batch_size=None,
+                                           to_numpy=False,
+                                           to_cpu=False,
+                                           no_grad=False,
+                                           verbose=False)
+            if prev_response is not None:
+                ins = response[layer]
+                outs = response['outputs'][:,output_units]
+                if lossfxn is not None and y is not None:
+                    truth = y[idx][:,output_units]
+                    outs = lossfxn(outs,truth)
+                grad = torch.autograd.grad(outs.sum(), ins)[0]
+                grad = grad.data.detach().cpu()
+                grad = grad.reshape(len(grad), *intg_grad.shape[1:])
+                # At intermediate layers, we don't know if the 0 alpha
+                # point has a response of 0, so we must subtract the
+                # zero alpha response to find the appropriate baseline.
+                # We also sum over each intermediate step because there
+                # might be a nonlinear response curve at intermediate
+                # layers.
+                act = (response[layer].data.cpu()-prev_response[layer])
+                act = act.reshape(grad.shape)
+                intg_grad[idx] += grad*act
+                if alpha == 1:
+                    if out_logits is None:
+                      out_logits = torch.zeros(len(X),len(output_units))
+                    outs = response['outputs'][:,output_units]
+                    out_logits[idx] = outs.data.cpu()
+            prev_response = {k:v.data.cpu() for k,v in response.items()}
+    del response
+    del grad
+
+    # Return to previous gradient calculation state
+    requires_grad(model, True)
+    # return to previous grad calculation state and training state
+    torch.set_grad_enabled(prev_grad_state)
+    if prev_train_state: model.train()
+    if to_numpy:
+        ndgrad = intg_grad.data.cpu().numpy()
+        ndactivs = out_logits.data.cpu().numpy()
+        return ndgrad, ndactivs
+    return intg_grad, out_logits
 
 
 if __name__=="__main__":

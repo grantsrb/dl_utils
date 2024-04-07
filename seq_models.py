@@ -7,7 +7,7 @@ import numpy as np
 import dl_utils.torch_modules as tmods
 from .utils import (
     generate_square_subsequent_mask, arglast, top_k_acc,
-    update_shape, padmask2attnmask
+    update_shape, padmask2attnmask, pad_to
 )
 import math
 
@@ -948,7 +948,7 @@ class Transformer(SequenceModule):
             hidden_states_only: bool
                 if true, will not bother computing the logits
             output_attentions: bool
-                if true, will return the unscaled attention weights
+                if true, will return the attention weights
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S)
@@ -1003,6 +1003,7 @@ class Transformer(SequenceModule):
                     inputs_embeds=None,
                     past_key_values=None,
                     stop_ids=None,
+                    output_attentions=False,
                     *args, **kwargs):
         """
         Arguments:
@@ -1034,6 +1035,8 @@ class Transformer(SequenceModule):
                 a token that is contained within stop_ids. The resulting
                 return sequence will be the sequence including the stop
                 id
+            output_attentions: bool
+                if true, will return the attention weights
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S+NSteps)
@@ -1106,6 +1109,7 @@ class Transformer(SequenceModule):
             p_end = past_key_values[0][0].shape[1]
 
         h_states = []
+        attentions = None
 
         for step in range(n_loops):
             ## The masks are inverted at this point, 1 means do attend
@@ -1128,6 +1132,12 @@ class Transformer(SequenceModule):
                 inputs_embeds=inpt_emb,
             )
             past_key_values = output.past_key_values
+            if output_attentions:
+                if attentions is None:
+                    attentions = [[layer] for layer in output.attentions]
+                else:
+                    for layer in range(len(output.attentions)):
+                        attentions[layer].append(output.attentions[layer])
 
             if len(h_states)==0:
                 h_states.append(output.last_hidden_state)
@@ -1150,12 +1160,21 @@ class Transformer(SequenceModule):
                     logits = logits[:,:S+step+1]
                     pred_ids = pred_ids[:,:S+step+1]
                     break
-        return {
+        ret_dict = {
             "logits": logits,
             "pred_ids":  pred_ids[:,int(not incl_all_inpts):],
             "past_key_values": past_key_values,
             "last_hidden_state": torch.cat(h_states, dim=1),
         }
+        if output_attentions:
+            for layer in range(len(attentions)):
+                npad = attentions[layer][-1].shape[-1]
+                for step in range(len(attentions[layer])):
+                    padded = pad_to(attentions[layer][step],npad,dim=-1)
+                    attentions[layer][step] = padded
+                attentions[layer] = torch.cat(attentions[layer],dim=2)
+            ret_dict["attentions"] = attentions
+        return ret_dict
 
 
 class HFTransformer(SequenceModule):

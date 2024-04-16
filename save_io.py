@@ -615,18 +615,33 @@ def save_json(data, file_name):
     file_name: str
         the path that you would like to save to
     """
-    try:
-        with open(file_name, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except (TypeError, OverflowError):
-        data = {**data}
-        keys = list(data.keys())
-        for k in keys:
-            if not is_jsonable(data[k]):
-                del data[k]
-                print("Removing", k, "from json")
-        with open(file_name, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+    failure = True
+    n_loops = 0
+    while failure and n_loops<10*len(data):
+        failure = False
+        n_loops += 1
+        try:
+            with open(file_name, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except (TypeError, OverflowError):
+            data = {**data}
+            keys = list(data.keys())
+            for k in keys:
+                if not is_jsonable(data[k]):
+                    if type(data[k])==dict:
+                        data = {**data, **data[k]}
+                        del data[k]
+                    elif type(data[k])==set:
+                        data[k] = list(data[k])
+                    else:
+                        del data[k]
+                    print("Removing", k, "from json")
+            try:
+                with open(file_name, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+            except:
+                print("trying again")
+                failure = True
 
 
 def load_yaml(file_name):

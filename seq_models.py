@@ -12,6 +12,12 @@ from .utils import (
 import math
 
 try:
+    from mamba_ssm import Mamba
+    from mamba_ssm.utils.generation import InferenceParams
+except:
+    print("You must install mamba")
+
+try:
     from transformers import (
         CONFIG_MAPPING,
         GPT2Config,
@@ -725,6 +731,9 @@ class Transformer(SequenceModule):
         encoder_layer_class = getattr(tmods, encoder_layer_class)
         pos_enc_class = getattr(tmods, pos_enc_class)
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        if self.seq_len is None: self.seq_len = 2048
+        if "rot_dim" in kwargs: rot_dim = kwargs["rot_dim"]
+        else: rot_dim = int(self.d_model//self.n_heads)
         self.pos_encs = pos_enc_class(
             d_model=self.d_model,
             max_len=max(2048, self.seq_len),
@@ -735,6 +744,7 @@ class Transformer(SequenceModule):
             self.layers.append(encoder_layer_class(
                 d_model=self.d_model,
                 nhead=self.n_heads,
+                rot_dim=rot_dim,
                 dim_feedforward=self.d_model*self.h_mult,
                 dropout=self.drop_p,
                 activation=F.gelu,
@@ -1819,6 +1829,192 @@ class TorchTransformer(SequenceModule):
         }
 
 
+class MambaModel(SequenceModule):
+    def __init__(self,
+                pos_enc_class="IdentityPositionalEncoding",
+                d_state=None,
+                d_conv=4,
+                expand=2,
+                dt_rank="auto",
+                dt_min=0.001,
+                dt_max=0.1,
+                dt_init="random",
+                dt_scale=1.0,
+                dt_init_floor=1e-4,
+                conv_bias=True,
+                bias=False,
+                use_fast_path=True,  # Fused kernel options
+                *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        self.state = None
+        if d_state is None: d_state = self.d_model
+        pos_enc_class = getattr(tmods, pos_enc_class)
+        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        if self.seq_len is None: self.seq_len = 2048
+        self.pos_encs = pos_enc_class(
+            d_model=self.d_model,
+            max_len=self.seq_len,
+            learnable=self.learn_posencs,
+        )
+        self.layers = torch.nn.ModuleList([])
+        for el in range(self.n_layers):
+            self.layers.append(Mamba(
+                d_model=self.d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand,
+                dt_rank=dt_rank,
+                dt_min=dt_min,
+                dt_max=dt_max,
+                dt_init=dt_init,
+                dt_scale=dt_scale,
+                dt_init_floor=dt_init_floor,
+                conv_bias=conv_bias,
+                bias=bias,
+                use_fast_path=use_fast_path,
+                layer_idx=el,
+            ))
+        #self.decoder = nn.LayerNorm(self.d_model)
+        #self.lm_head = nn.Linear(self.d_model, self.n_tokens)
+        d_hid = self.d_model*4
+        modules = []
+        modules.append(torch.nn.Linear( self.d_model, d_hid ))
+        modules.append(torch.nn.GELU())
+        if self.l_norm:
+            modules.append(torch.nn.LayerNorm(d_hid))
+        modules.append(torch.nn.Dropout(self.drop_p))
+        self.decoder = torch.nn.Sequential( *modules )
+        self.lm_head = torch.nn.Linear( d_hid, self.out_tokens )
+        self.init_weights()
+
+    def reset_state(self, batch_size=1, seq_len=None):
+        """
+        Refreshes the state of the SSM
+
+        Args:
+            batch_size: int
+            seq_len: None or int
+                the maximum sequence length of the sequence.  if None,
+                uses self.seq_len.
+        Returns:
+            infp: InferenceParams
+                a new InferenceParams object
+        """
+        slen = seq_len if seq_len is not None else self.seq_len
+        self.state = InferenceParams(
+            max_seqlen=slen,
+            max_batch_size=batch_size)
+        return self.state
+    
+    def step(self,
+             inpts=None,
+             hs=None,
+             temperature=None,
+             inputs_embeds=None,
+             *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize,seqlen]``
+                if None, inputs_embeds must be not None
+            hs: InferenceParams
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            inputs_embeds: None or Tensor, shape (B,S,D)
+                optionally argue the embeddings directly instead of
+                token ids.
+        Returns:
+            dict:
+                logits: Tensor of shape (B, S, N)
+                pred_ids: Tensor of shape (B, S)
+                hs: list of Tensors with shape (B, D)
+                    a list of updated h vectors for each lstm
+        """
+        if inpts is not None: inpt = self.embeddings(inpts)
+        else: inpt = inputs_embeds
+        if len(inpt.shape)==2: inpt = inpt[:,None]
+        if hs is None: hs = self.state
+
+        # Loop through mamba layers of model
+        for l,layer in enumerate(self.layers):
+            out = layer(inpt, inference_params=hs)
+            inpt = out
+        logits = self.lm_head(self.decoder(out))
+        pred_ids = self.sample_with_temperature(logits, temperature )
+        hs.seqlen_offset += inpt.shape[1]
+        return {
+            "logits":   logits,
+            "pred_ids": pred_ids,
+            "hs": hs, 
+        }
+
+    def forward(self, inpts:torch.Tensor,
+                      n_steps:int=0,
+                      temperature=None,
+                      inputs_embeds=None,
+                      stop_ids=None,
+                      reset_state=True,
+                      *args, **kwargs):
+        """
+        Arguments:
+            inpts: Tensor, shape ``[bsize, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            inputs_embeds: None or Tensor, shape (B,S,D)
+                optionally argue the embeddings directly instead of
+                token ids.
+            stop_ids: set of ints
+                the prediction loop will terminate if the model produces
+                a token that is contained within stop_ids. The resulting
+                return sequence will be the sequence including the stop
+                id
+            reset_state: bool
+                optionally use the state from the last pass. defaults to
+                resetting the state.
+        Returns:
+            ret_dict: dict
+                logits: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+                pred_ids: Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+        """
+        if stop_ids is not None:
+            if type(stop_ids)==int: stop_ids = [stop_ids]
+            if len(stop_ids)>0:
+                stop_ids = torch.LongTensor(list(stop_ids))
+                stop_ids = stop_ids.to(self.get_device())
+            else: stop_ids = None
+        else: stop_ids = None
+        if not inputs_embeds:
+            embs = self.embeddings(inpts)
+        else: embs = inputs_embeds
+
+        B,S,D = embs.shape
+        logits = []
+        pred_ids = []
+        if reset_state: self.reset_state(batch_size=B,seq_len=S+n_steps)
+
+        for step in range(n_steps+1):
+            if step==0: inpt = embs
+            else: inpt = self.embeddings(pred_ids[-1][:,-1:])
+            ret_dict = self.step(
+                inputs_embeds=inpt,
+                hs=self.state,
+                temperature=temperature)
+            logits.append(ret_dict["logits"])
+            pred_ids.append(ret_dict["pred_ids"])
+            if stop_ids is not None and torch.isin(pred_ids[-1],stop_ids):
+                break
+        return {
+            "logits": torch.cat(logits, dim=1),
+            "pred_ids": torch.cat(pred_ids,dim=1),
+            "hs": self.state,
+        }
 
 
 
@@ -2020,18 +2216,20 @@ class LossWrapper(torch.nn.Module):
               self.tokenizer.decode(data["input_ids"][i]))
             print("Full Outpt:",
               self.tokenizer.decode(data["output_ids"][i]))
+            print("Full inpt mask", inpt_pad_mask[i])
+            print("Full outpt mask", out_pad_mask[i])
             print("dropped inpt:",
               self.tokenizer.decode(
-                data["input_ids"][i][inpt_pad_mask[i]]))
+                data["input_ids"][i].cpu()[inpt_pad_mask[i].cpu()]))
             print("dropped out:",
               self.tokenizer.decode(
-                data["output_ids"][i][out_pad_mask[i]]))
+                data["output_ids"][i].cpu()[out_pad_mask[i].cpu()]))
             print("post inpt:",
               self.tokenizer.decode(
-                data["input_ids"][i][~inpt_pad_mask[i]]))
+                data["input_ids"][i].cpu()[~inpt_pad_mask[i].cpu()]))
             print("post out:",
               self.tokenizer.decode(
-                data["output_ids"][i][~out_pad_mask[i]]))
+                data["output_ids"][i].cpu()[~out_pad_mask[i].cpu()]))
 
         idx = inpt_pad_mask.float().sum(-1)!=out_pad_mask.float().sum(-1)
         print()

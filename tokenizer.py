@@ -6,6 +6,51 @@ import numpy as np
 The word "token" refers to an atomic string that has a direct mapping to
 a token id. Token ids refer to an int id value that can then be used as
 an index to an Embedding.
+
+Use the tokenizer in the following way:
+
+    X = [
+        "hey I'm a string",
+        "hey so am I",
+    ]
+    tokenizer = Tokenizer(strings=X)
+    input_ids = tokenizer(
+        strings=X,
+        as_tensor=True,
+        seq_len=128,
+        add_bos=True,
+        add_eos=True,)
+
+or
+
+    X = [
+        "hey I'm a string",
+        "hey so am I",
+    ]
+    tokenizer = Tokenizer()
+    tokenizer.train(X=X)
+    input_ids = tokenizer(
+        strings=X,
+        as_tensor=True,
+        seq_len=128,
+        add_bos=True,
+        add_eos=True,)
+
+or
+
+    X = [
+        ["hey", "I'm", "a", "list", "of", "strings",],
+        ["hey", "so", "am", "I",],
+    ]
+    tokenizer = Tokenizer()
+    tokenizer.train(tok_X=X)
+    input_ids = tokenizer.toks_to_ids(
+        toks=X,
+        as_tensor=True,
+        seq_len=128,
+        add_bos=True,
+        add_eos=True,)
+    list_of_strs = tokenizer.decode(input_ids)
 """
 
 def tokenize(main_string, delimeters={" "},
@@ -258,13 +303,9 @@ class Tokenizer():
         }
         self.split_digits = split_digits
 
-        self.train()
         if words is None:
             words = set()
-        if split_digits:
-            words |= set([str(i) for i in range(10)])
-        else:
-            words |= set([str(i) for i in range(100)])
+        #if split_digits: words |= set([str(i) for i in range(10)])
         words |= set(self.special_tokens.values())
 
         if word2id is None:
@@ -308,34 +349,75 @@ class Tokenizer():
     def train(self,
               X=None,
               tok_X=[],
+              alphabetize=False,
               verbose=True):
         """
         X: list of strings
             these are the strings that will be tokenized and indexed.
             if None is argued, the word2id and id2word must not be
             None
-        tok_X: list of tokens
+        tok_X: list of lists of tokens
             these are the strings that will be tokenized and indexed.
             if None is argued, the word2id and id2word must not be
             None
+        alphabetize: bool
+            if true, will alphabetize the token mapping, so that the
+            words have ids according to their alphabetical ordering
         """
         words = set()
         assert len(tok_X) == 0 or X is None
         if X is not None:
             if verbose:
                 print("Tokenizing")
-            if X is not None:
-                tok_X,_,new_words = self.tokenize(
-                    X, ret_all=True, verbose=verbose
-                )
-                words |= new_words
-        self.tok_X = tok_X
+            tok_X,_,new_words = self.tokenize(
+                X, ret_all=True, verbose=verbose
+            )
+            words |= new_words
+        else:
+            if type(tok_X)==set: tok_X = list(tok_X)
+            if type(tok_X[0])==str: tok_X = tok_X[0]
+            for toks in tok_X:
+                words |= set(toks)
 
+        if alphabetize:
+            words = sorted(list(words))
         for word in words:
             if word not in self.word2id:
                 tid = len(self.word2id)
                 self.word2id[word] = tid 
                 self.id2word[tid] = word
+
+    def convert2id(self, string, verbose=False):
+        """
+        This function is useful for getting the id of individual strings.
+
+        Args:
+            string: str
+        Returns:
+            id: int
+        """
+        try:
+            return self.word2id[str(string)]
+        except:
+            if verbose:
+                print(f"Tokenizer key error using {string}")
+            return self.unk_id
+
+    def convert2word(self, id_, verbose=False):
+        """
+        This function is useful for getting the string of individual ids.
+
+        Args:
+            id: int
+        Returns:
+            string: str
+        """
+        try:
+            return self.id2word[int(id_)]
+        except:
+            if verbose:
+                print(f"Tokenizer error using {id_}")
+            return self.unk_token
 
     def tokenize(self,
                  lostr,
@@ -426,12 +508,7 @@ class Tokenizer():
                 if j==seq_len-1 and add_eos:
                     ids[i].append(self.eos_id)
                     break
-                try:
-                    ids[i].append(self.word2id[t])
-                except:
-                    if verbose:
-                        print(f"Tokenizer key error using {t}")
-                    ids[i].append(self.unk_id)
+                ids[i].append(self.convert2id(t, verbose=verbose))
             if add_eos and len(ids[i])<seq_len:
                 ids[i].append(self.eos_id)
             if seq_len<np.inf and len(ids[i])<seq_len:
@@ -442,6 +519,31 @@ class Tokenizer():
         if as_tensor:
             return torch.LongTensor(ids)
         return ids
+    
+    def ids_to_toks(self, ids, verbose=False):
+        """
+        Converts a list of token_ids to a list of 
+
+        Args:
+            ids: int or list of ints or tensor
+                the indices to be converted to string values
+            delimeter: str
+                the character to delimit the strings by.
+        Returns:
+            strings: list of str
+                a list of the joined string values of the argued indices
+        """
+        if type(ids)==int: ids = [[ids]]
+        elif hasattr(ids, "shape") and len(ids.shape)==1: ids = [ids]
+        elif type(ids)==list and type(ids[0])==int: ids = [ids]
+        toks = []
+        for seq in ids:
+            if len(seq)>0:
+                s = []
+                for i in seq:
+                    s.append(self.convert2word(i, verbose=verbose))
+                toks.append(s)
+        return toks
     
     def ids_to_strs(self, ids, delimeter=" "):
         """
@@ -456,17 +558,10 @@ class Tokenizer():
             strings: list of str
                 a list of the joined string values of the argued indices
         """
-        if type(ids)==int: ids = [[ids]]
-        elif hasattr(ids, "shape") and len(ids.shape)==1: ids = [ids]
+        toks = self.ids_to_toks(ids=ids)
         strings = []
-        for seq in ids:
-            if len(seq)>0:
-                s = []
-                for i in seq:
-                    if int(i) in self.id2word:
-                        s.append(self.id2word[int(i)])
-                    else: s.append(self.unk_token)
-                strings.append(delimeter.join(s))
+        for seq in toks:
+            strings.append(delimeter.join(seq))
         return strings
     
     def decode(self, ids):

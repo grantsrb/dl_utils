@@ -876,6 +876,9 @@ class RotaryEmbedding(nn.Module):
             x_rope, x_pass = x[..., :self.d], x[...,self.d:]
         neg_half_x = self.neg_half(x_rope)
         x_rope = (x_rope*self.cos_cached[offset:S+offset])
+        # If you got an error here, you probably need a different sized
+        # rotary dimension. Try arguing a power of 2 for d_model and
+        # use an even number of attention heads.
         x_rope = x_rope + (neg_half_x*self.sin_cached[offset:S+offset])
         if x_pass is not None:
             x_rope = torch.cat([x_rope, x_pass],dim=-1)
@@ -1236,7 +1239,7 @@ class RotaryEncoderLayer(SimpleEncoderLayer):
     """
     def __init__(self,
             *args,
-            rot_dim=32,
+            rot_dim=None,
             **kwargs):
         """
         Args:

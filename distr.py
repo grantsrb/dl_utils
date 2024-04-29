@@ -39,7 +39,7 @@ values will be on the second session, etc.
 
 import sys
 import os
-from dl_utils.utils import load_json_or_yaml, save_json
+from dl_utils.save_io import load_json_or_yaml, save_json
 from dl_utils.training import fill_hyper_q
 from datetime import datetime
 from collections import deque

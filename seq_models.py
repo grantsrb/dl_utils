@@ -415,7 +415,7 @@ class RNN(SequenceModule):
             pred_ids = inpts.detach().data.clone()
 
         if pad_mask is None:
-            idx = torch.zeros(B, device=self.get_device()).bool()
+            idx = torch.ones(B, device=self.get_device()).bool()
         else:
             idx = ~pad_mask.bool()
 
@@ -2261,7 +2261,7 @@ class EmptyTokenizer:
         return x
 
 def make_model(config):
-    config["encoder_layer_class"] = "SimpleEncoderLayer"
+    config["encoder_layer_class"] = "RotaryEncoderLayer"
     model = globals()[config.get("model_type","Transformer")](**config)
     #model = globals()[config.get("model_type","LinearRNN")](**config)
     return LossWrapper(model=model, config=config, **config)

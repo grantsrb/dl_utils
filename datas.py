@@ -16,6 +16,7 @@ class CausalDataset(torch.utils.data.Dataset):
                  bos_id=1,
                  eos_id=2,
                  concat=False,
+                 dynamic_concat=False,
                  cat_seq_len=None,
                  *args, **kwargs):
         """
@@ -44,6 +45,9 @@ class CausalDataset(torch.utils.data.Dataset):
             concat: bool
                 if true, will concat all samples together into one long
                 sequence that will then be sampled from uniformly.
+            dynamic_concat: bool
+                if true, will shuffle and reconcat the samples at the
+                beginning of every new epoch.
             cat_seq_len: None or int
                 if concatenate is true, the data will be sampled in
                 sequence lengths of cat_seq_len.
@@ -53,6 +57,7 @@ class CausalDataset(torch.utils.data.Dataset):
         self.eos_id = eos_id
         self.seq_len = cat_seq_len
         self.concat = concat
+        self.dynamic_concat = dynamic_concat
 
         if type(data)==str:
             data_path = data
@@ -76,11 +81,17 @@ class CausalDataset(torch.utils.data.Dataset):
                         if ".p" in data_path:
                             with open(self.data_path, "rb") as f:
                                 masks[k] = pickle.load(f)
+
         self.inpt_seqs = data
         self.outp_seqs = labels
         self.masks = masks
         if self.masks is not None and type(self.masks)!=dict:
             self.masks = { "mask": self.masks }
+
+        if self.concat and self.dynamic_concat:
+            self.og_seqs = data
+            self.og_labels = labels
+            self.og_masks = {**self.masks}
 
         if self.seq_len is None:
             if self.concat:
@@ -103,18 +114,19 @@ class CausalDataset(torch.utils.data.Dataset):
                 for k in self.masks:
                     self.masks[k] = torch.BoolTensor(self.masks[k])
         elif type(self.inpt_seqs)==list and self.concat:
-            seqs = []
-            for seq in self.inpt_seqs: seqs += seq
-            self.inpt_seqs = torch.LongTensor(seqs)
-            if self.outp_seqs is not None:
+            if not self.dynamic_concat:
                 seqs = []
-                for seq in self.outp_seqs: seqs += seq
-                self.outp_seqs = torch.LongTensor(seqs)
-            if self.masks is not None:
-                for k in self.masks:
+                for seq in self.inpt_seqs: seqs += seq
+                self.inpt_seqs = torch.LongTensor(seqs)
+                if self.outp_seqs is not None:
                     seqs = []
-                    for seq in self.masks[k]: seqs += seq
-                    self.masks[k] = torch.BoolTensor(seqs)
+                    for seq in self.outp_seqs: seqs += seq
+                    self.outp_seqs = torch.LongTensor(seqs)
+                if self.masks is not None:
+                    for k in self.masks:
+                        seqs = []
+                        for seq in self.masks[k]: seqs += seq
+                        self.masks[k] = torch.BoolTensor(seqs)
         else:
             self.inpt_seqs = torch.LongTensor(self.inpt_seqs)
             if self.outp_seqs is not None:
@@ -124,8 +136,54 @@ class CausalDataset(torch.utils.data.Dataset):
                     self.masks[k] = torch.BoolTensor(self.masks[k])
 
     def __len__(self):
-        if self.concat: return len(self.inpt_seqs)-self.seq_len-1
+        if self.concat and not self.dynamic_concat:
+            return len(self.inpt_seqs)-self.seq_len-1
         return len(self.inpt_seqs)
+
+    def dynamic_concat_getitem(self, idx):
+        """
+        This function will concat a number of uniformly sampled sequences
+        together in addition to the indexed sequence to dynamically
+        vary the concatenated data.
+        """
+        ridx = np.random.randint(len(self.inpt_seqs))
+        samps = [i for i in self.inpt_seqs[ridx]]
+        samps += [i for i in self.inpt_seqs[idx]]
+        out_samps = None
+        if self.outp_seqs is not None:
+            out_samps = [i for i in self.outp_seqs[ridx]]
+            out_samps += [i for i in self.outp_seqs[idx]]
+        masks = {k: [i for i in self.masks[k][ridx]] for k in self.masks}
+        for k in masks:
+            masks[k] += [i for i in self.masks[k][idx]]
+        end_len = self.seq_len+len(samps)
+        while len(samps) < end_len:
+            ridx = np.random.randint(len(self.inpt_seqs))
+            samps += [i for i in self.inpt_seqs[ridx]]
+            if self.outp_seqs is not None:
+                out_samps += [i for i in self.outp_seqs[ridx]]
+            for k in masks:
+                masks[k] += [i for i in self.masks[k][ridx]]
+
+        # Shift and cut at seq_len
+        shift = np.random.randint(len(samps)-self.seq_len)
+        end = self.seq_len+shift
+        input_ids = torch.LongTensor(samps[shift:end])
+        masks = {k: torch.BoolTensor(masks[k][shift:end]) for k in masks}
+        if out_samps is not None:
+            output_ids = torch.LongTensor(out_samps[shift:end])
+        else:
+            output_ids = input_ids[1:]
+            input_ids = input_ids[:-1]
+        if "input_pad_mask" not in masks:
+            m = (input_ids==self.pad_id)|(input_ids==self.eos_id)
+            masks["input_pad_mask"] = m
+        if "output_pad_mask" not in masks:
+            m = (output_ids==self.pad_id)|(output_ids==self.bos_id)
+            masks["output_pad_mask"] = m
+
+        return { "input_ids":input_ids, "output_ids":output_ids, **masks}
+
 
     def __getitem__(self, idx):
         """
@@ -137,13 +195,16 @@ class CausalDataset(torch.utils.data.Dataset):
                 "output_pad_mask": bool tensor (S,)
         """
         if self.concat:
+            if self.dynamic_concat:
+                return self.dynamic_concat_getitem(idx)
             samp = self.inpt_seqs[idx:idx+self.seq_len]
         else:
             samp = self.inpt_seqs[idx]
-        input_ids = samp[:-1]
+        input_ids = samp
 
         ## Outputs
         if self.outp_seqs is None:
+            input_ids = samp[:-1]
             output_ids = samp[1:]
         else:
             if self.concat:

@@ -321,10 +321,12 @@ def load_checkpoint(path, use_best=False):
             path = checkpts[-1]
     data = torch.load(path, map_location=torch.device("cpu"))
     data["loaded_path"] = path
+    if "config" in data:
+        data["hyps"] = data["config"]
     if "hyps" not in data: 
         data["hyps"] = get_hyps(path)
     if "epoch" not in data:
-        # Untested!!
+        # TODO Untested!!
         ext = path.split(".")[-1]
         data["epoch"] = int(path.split("."+ext)[0].split("_")[-1])
         torch.save(data, path) 
@@ -372,6 +374,8 @@ def load_model(path, models, load_sd=True, use_best=False,
         kwargs = data['hyps']
     elif 'model_hyps' in data:
         kwargs = data['model_hyps']
+    elif "config" in data:
+        kwargs = data["config"]
     else:
         kwargs = get_hyps(path)
     if models is None: models = globals()
@@ -420,15 +424,13 @@ def get_hyps(folder):
     """
     folder = os.path.expanduser(folder)
     if not os.path.isdir(folder):
-        folder = get_model_folders(folder)[0]
-    hyps_json = os.path.join(folder, "hyperparams.json")
-    if os.path.exists(hyps_json):
-        hyps = load_json(hyps_json)
-        return hyps
-    hyps_yaml = os.path.join(folder, "hyperparams.yaml")
-    if os.path.exists(hyps_yaml):
-        hyps = load_yaml(hyps_yaml)
-        return hyps
+        folder = "/".join(folder.split("/")[:-1])
+    for name in ["hyperparams", "config"]:
+        for ext in ["json", "yaml"]:
+            f = os.path.join(folder, f"{name}.{ext}")
+            if os.path.exists(hyps_json):
+                hyps = load_json_or_yaml(f)
+                return hyps
     return None
 
 def load_hyps(folder):

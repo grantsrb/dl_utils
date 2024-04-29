@@ -243,10 +243,10 @@ class Tokenizer():
     def __init__(self, word2id=None,
                        id2word=None,
                        split_digits=True,
-                       pad_token="|<PAD>|",
-                       bos_token="|<BOS>|",
-                       eos_token="|<EOS>|",
-                       unk_token="|<UNK>|",
+                       pad_token="<PAD>",
+                       bos_token="<BOS>",
+                       eos_token="<EOS>",
+                       unk_token="<UNK>",
                        strings=None,
                        words={"\\newline",'\n'},
                        delimeters={" "}):
@@ -293,18 +293,20 @@ class Tokenizer():
         self.pad_token = pad_token
         self.bos_token = bos_token
         self.eos_token = eos_token
-        self.unk_token = unk_token
         self.delimeters = delimeters
         self.special_tokens = {
             "pad_token": self.pad_token,
             "bos_token": self.bos_token,
             "eos_token": self.eos_token,
-            "unk_token": self.unk_token,
         }
+        if unk_token is not None:
+            self.unk_token = unk_token
+        else:
+            self.unk_token = self.pad_token
+        self.special_tokens["unk_token"] = self.unk_token
         self.split_digits = split_digits
 
-        if words is None:
-            words = set()
+        if words is None: words = set()
         #if split_digits: words |= set([str(i) for i in range(10)])
         words |= set(self.special_tokens.values())
 
@@ -522,16 +524,15 @@ class Tokenizer():
     
     def ids_to_toks(self, ids, verbose=False):
         """
-        Converts a list of token_ids to a list of 
+        Converts a list of token_ids to a list of lists of str
 
         Args:
-            ids: int or list of ints or tensor
+            ids: list of lists of ints or tensor (B,S)
                 the indices to be converted to string values
-            delimeter: str
-                the character to delimit the strings by.
         Returns:
-            strings: list of str
-                a list of the joined string values of the argued indices
+            strings: list of lists of str
+                a list of lists of the string values of the argued
+                ids
         """
         if type(ids)==int: ids = [[ids]]
         elif hasattr(ids, "shape") and len(ids.shape)==1: ids = [ids]

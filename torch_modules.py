@@ -9,6 +9,7 @@ from .utils import (
     get_causal_cross_mask,
     get_causal_mask,
     get_full_cross_mask,
+    device_fxn,
 )
 
 try:
@@ -111,7 +112,7 @@ class CoreModule(nn.Module):
             return False
 
     def get_device(self):
-        return DEVICES[next(self.parameters()).get_device()]
+        return device_fxn(next(self.parameters()).get_device())
 
     def sample_with_temperature(self, logits, temperature):
         """
@@ -377,11 +378,118 @@ class GenerativeLSTM(nn.Module):
             outpts.append(h)
         return torch.stack(outpts, dim=1)
 
-class MultiheadAttention(nn.Module):
+class SplitPathwayRecurrence(nn.Module):
     """
+    This module uses k parallel recurrent cells for n layers in place
+    of a single recurrent model for n layers.
 
+              rnn_0 -> linear_00 -> ... -> linear_0n 
+            /                                        \
+    inpt -> - rnn_1 -> linear_10 -> ... -> linear_1n  - cat -> out
+            ..........................................
+            \                                        /
+              rnn_k -> linear_k0 -> ... -> linear_kn
     """
+    def __init__(self,
+                 inpt_size,
+                 d_model,
+                 rnn_type="RNNCell",
+                 n_linears=0,
+                 n_paths=2,
+                 *args, **kwargs):
+        """
+        inpt_size: int
+        d_model: int
+        rnn_type: str
+            the type of rnn cell to use
+        n_linears: int
+            the number of subsequent linear layers per pathway (n in the
+            diagram)
+        n_paths: int
+            the number of parallel pathways (k in the diagram)
+        """
+        super().__init__()
+        self.inpt_size = inpt_size
+        self.d_model = d_model
+        self.n_linears = n_linears
+        self.n_paths = n_paths
+        assert self.d_model % self.n_paths == 0
+        self.h_size = d_model//self.n_paths
+
+        if hasattr(torch.nn, rnn_type):
+            rnn_type = getattr(torch.nn, rnn_type)
+        else:
+            rnn_type = globals()[rnn_type]
+
+        self.inpt_proj = nn.Linear(inpt_size, d_model)
+        self.h_proj = nn.Linear(d_model, d_model)
+        self.rnns = nn.ModuleList([])
+        self.linears = nn.ModuleList([])
+        rng = range(self.n_linears)
+        for k in range(self.n_paths):
+            self.rnns.append(rnn_type(self.h_size,self.h_size))
+            linears = [ nn.Linear(self.h_size,self.h_size) for _ in rng ]
+            self.linears.append( nn.ModuleList(linears) )
+
+    def run_path(self, path_idx, x, h, *args, **kwargs):
+        """
+        path_idx: int
+            the index of the rnn and weights
+        x: torch tensor (B, H)
+            batch by h_size dimension
+        h: torch tensor (B, H)
+            the recurrent state
+        """
+        new_h = self.rnns[path_idx](x,h)
+        if len(self.linears[path_idx])>0: # assume new_h is a tensor
+            for linear in self.linears[path_idx]:
+                new_h = linear(new_h)
+        return new_h
+
+    def forward(self, x, hs, *args, **kwargs):
+        """
+        x: torch tensor (B, I)
+            batch by inpt dimension
+        hs: tuple or list of tensors
+            there should be n_paths hs. each h is a tensor
+            of shape (B, H).
+        """
+        B,I = x.shape
+        fx = self.inpt_proj(x).reshape(B, self.n_paths, self.h_size)
+        if type(hs)==type(torch.ones(0)):
+            hs = self.h_proj(hs).reshape(B,self.n_paths,self.h_size)
+        rets = [
+          self.run_path(i, fx[:,i], hs[:,i]) for i in range(self.n_paths)
+        ]
+        if type(rets[0])==tuple:
+            raise NotImplemented
+            cats = [[] for _ in range(len(rets[0]))]
+            for r in rets:
+                for i in range(len(r)):
+                    cats[i].append(r[i])
+            rets = tuple([torch.cat(c,dim=-1) for c in cats])
+        else:
+            rets = torch.cat(rets, dim=-1)
+        return rets
+
+class SplitRNN(SplitPathwayRecurrence):
     pass
+
+class SplitGRU(SplitPathwayRecurrence):
+    def __init__(self,
+                inpt_size,
+                d_model,
+                rnn_type="GRUCell",
+                *args, **kwargs):
+        super().__init__(inpt_size, d_model, rnn_type=rnn_type, **kwargs)
+
+class SplitLSTM(SplitPathwayRecurrence):
+    def __init__(self,
+                inpt_size,
+                d_model,
+                rnn_type="LSTMCell",
+                *args, **kwargs):
+        super().__init__(inpt_size, d_model, rnn_type=rnn_type, **kwargs)
 
 class CrossAttention(nn.Module):
     """
@@ -937,6 +1045,8 @@ class MultiHeadAttention(nn.Module):
             self.proj_dim*nhead, self.d_model, bias=bias)
         self.init_weights()
 
+        self.sdp_attn = ScaledDotProductAttn()
+
     def init_weights(self,):
         nn.init.xavier_uniform_(self.q_proj.weight)
         nn.init.xavier_uniform_(self.k_proj.weight)
@@ -1023,15 +1133,71 @@ class MultiHeadAttention(nn.Module):
         attn_out = F.scaled_dot_product_attention(
             query=q,key=k,value=v,attn_mask=attn_mask,is_causal=is_causal)
         if output_attentions:
-            scale = math.sqrt(k.shape[-1])
-            weights = torch.einsum("bnlp,bnsp->bnls", q,k)/scale
-            if attn_mask is not None:
-                weights = weights.masked_fill_(~attn_mask,float(-math.inf))
-            ret_dict["attentions"] = torch.softmax(weights, dim=-1)
+            # TODO
+            #scale = math.sqrt(k.shape[-1])
+            #weights = torch.einsum("bnlp,bnsp->bnls", q,k)/scale
+            #if attn_mask is not None:
+            #    weights = weights.masked_fill_(~attn_mask,float(-math.inf))
+            #ret_dict["attentions"] = torch.softmax(weights, dim=-1)
+            ret = self.sdp_attn(q,k,v,attn_mask)
+            for k in ret:
+                ret_dict[k] = ret[k]
+            if "attn_out" in ret and ret["attn_out"] is not None:
+                attn_out = ret["attn_out"]
+                del ret_dict["attn_out"]
+            #try:
+            #    assert torch.isclose(ret["attn_out"], attn_out)
+            #except:
+            #    print("sdp not close!!")
+            #    print("sdp attn:", ret["attn_out"][0,0])
+            #    print("torch attn:", attn_out[0,0])
+            #    print("sdp attn:", ret["attn_out"].shape)
+            #    print("torch attn:", attn_out[0,0].shape)
+
         ret_dict["output"] = self.out_proj(
             attn_out.permute(0,2,1,3).reshape(B,L,N*P))
         return ret_dict
 
+class ScaledDotProductAttn(nn.Module):
+    """
+    This can be useful for causal interventions in the attention
+    mechanism of transformers.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, q, k, v, mask):
+        """
+        Args:
+            q: tensor (B,N,L,D)
+            k: tensor (B,N,S,D)
+            v: tensor (B,N,S,P)
+        Returns:
+            attentions: tensor (B,N,L,S)
+            attn_out: None or tensor (B,N,L,P)
+                if a tensor is returned, it overwrites the attn_out
+                in the MultiHeadAttention forward function.
+        """
+        # = inpt_tuple
+        scale = math.sqrt(k.shape[-1])
+        strens = torch.einsum("bnld,bnsd->bnls", q,k)/scale
+        if mask is not None:
+            strens = strens.masked_fill_(~mask,float(-math.inf))
+        attns = torch.softmax(strens, dim=-1)
+
+        ret_dict = {
+            "attentions": attns,
+        }
+
+        # Can optionally return the attn_out and it will overwrite
+        # the attention out in the MultiHeadAttention module forward
+        # function.
+        #exp_strens = torch.exp(strens)
+        #stren_vals = torch.einsum("bnls,bnsp->bnlsp", exp_strens, v)
+        #attn_out = torch.einsum("bnls,bnsp->bnlp",attns,v)
+        #ret_dict["attn_out"] = attn_out
+
+        return ret_dict
 
 class RotaryAttention(MultiHeadAttention):
     def __init__(self, rot_dim=None, *args, **kwargs):

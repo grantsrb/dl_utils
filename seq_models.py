@@ -331,7 +331,10 @@ class RNN(SequenceModule):
     def __init__(self, rnn_type="RNNCell", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = "RNN"
-        self.rnn_type = getattr(torch.nn, rnn_type)
+        if hasattr(torch.nn, rnn_type):
+            self.rnn_type = getattr(torch.nn, rnn_type)
+        else:
+            self.rnn_type = getattr(tmods, rnn_type)
 
         if self.n_tokens:
             self.embeddings = torch.nn.Embedding(
@@ -345,9 +348,15 @@ class RNN(SequenceModule):
         for i in range(self.n_layers):
             if self.l_norm or self.h_norm:
                 self.layer_norms.append(torch.nn.LayerNorm(self.d_model))
-            self.rnns.append(
-                self.rnn_type(self.d_model, self.d_model)
-            )
+            if hasattr(torch.nn, rnn_type):
+                rnn = self.rnn_type(self.d_model, self.d_model)
+            else:
+                rwargs = {
+                    **kwargs,
+                    "inpt_size": self.d_model,
+                    "d_model": self.d_model}
+                rnn = self.rnn_type(**rwargs)
+            self.rnns.append(rnn)
         d_hid = self.d_model*4
         modules = []
         modules.append(torch.nn.Linear( self.d_model, d_hid ))
@@ -621,11 +630,12 @@ class LSTM(RNN):
         
         new_hs = [ h.clone() for h in hs ]
         new_cs = [ c.clone() for c in cs ]
-        inpt = self.pre_norm(inpt)
+        if self.l_norm:
+            inpt = self.pre_norm(inpt)
         if len(inpt)>0:
             # Loop through lstm layers of model
-            for l in range(len(self.lstms)):
-                lstm = self.lstms[l]
+            for l in range(len(self.rnns)):
+                lstm = self.rnns[l]
                 h,c = (hs[l][idx], cs[l][idx])
                 h,c = lstm(inpt, (h,c))
                 if self.h_norm or self.l_norm:

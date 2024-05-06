@@ -635,9 +635,14 @@ def save_json(data, file_name):
                         del data[k]
                     elif type(data[k])==set:
                         data[k] = list(data[k])
+                    elif hasattr(data[k],"__name__"):
+                        data[k] = data[k].__name__
                     else:
-                        del data[k]
-                    print("Removing", k, "from json")
+                        try:
+                            data[k] = str(data[k])
+                        except:
+                            del data[k]
+                            print("Removing", k, "from json")
             try:
                 with open(file_name, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)

@@ -61,24 +61,30 @@ def distr_ranges(script, meta, rng_paths):
     tmux_sesh = "tmux new -d -s"
     exe = "python3 {}".format(script)
     for rng_path, device in zip(rng_paths, meta["devices"]):
-        cuda = "export CUDA_VISIBLE_DEVICES=" + str(device)
-        deterministic = "export CUBLAS_WORKSPACE_CONFIG=:4096:8"
-        sesh_name = "{}{}".format(exp_name[:4],device)
-        timestamp = str(datetime.now()).replace(" ", "_")
-        timestamp = timestamp.split(".")[0].replace(":",".")
-        fname = sesh_name+"_"+timestamp+".txt"
-        log_file = os.path.join(stdout_folder, fname)
-        command = "{} \"{}\" \'{}; {}; {} {} {}\'".format(
-            tmux_sesh,
-            sesh_name,
-            cuda,
-            deterministic,
-            exe,
-            meta["hyperparams"],
-            rng_path
-        )
-        print(command)
-        os.system(command)
+        ret = 1
+        n_loops = 0
+        while ret!=0 and n_loops<10:
+            cuda = "export CUDA_VISIBLE_DEVICES=" + str(device)
+            deterministic = "export CUBLAS_WORKSPACE_CONFIG=:4096:8"
+            sesh_name = "{}{}-{}".format(exp_name[:4],n_loops,device)
+            timestamp = str(datetime.now()).replace(" ", "_")
+            timestamp = timestamp.split(".")[0].replace(":",".")
+            fname = sesh_name+"_"+timestamp+".txt"
+            log_file = os.path.join(stdout_folder, fname)
+            command = "{} \"{}\" \'{}; {}; {} {} {}\'".format(
+                tmux_sesh,
+                sesh_name,
+                cuda,
+                deterministic,
+                exe,
+                meta["hyperparams"],
+                rng_path
+            )
+            print(command)
+            ret = os.system(command)
+            n_loops += 1
+            if ret!=0:
+                print("system returned:", ret,"-- trying again")
 
 def split_ranges(meta):
     """
@@ -104,6 +110,9 @@ def split_ranges(meta):
     # Save to folder that we found the ranges
     # Each ranges is saved as exp_name{cuda_device}.json
     save_path = os.path.abspath(meta["hyperranges"]).split("/")
+    save_path[-2] = "meta_configs"
+    if not os.path.exists("/".join(save_path[:-1])):
+        os.mkdir("/".join(save_path[:-1]))
     save_path[-1] = load_json_or_yaml(meta["hyperparams"])["exp_name"]
     save_path = "/".join(save_path)
 
@@ -141,9 +150,10 @@ def split_ranges(meta):
 
     # Save hyperranges to json files
     for device in devices:
-        path = save_path+"{}.json".format(device)
-        rng_paths.append(path)
-        save_json(range_dict[device], path)
+        if device in range_dict and range_dict[device] is not None:
+            path = save_path+"{}.json".format(device)
+            rng_paths.append(path)
+            save_json(range_dict[device], path)
     return rng_paths
 
 if __name__ == "__main__":

@@ -400,6 +400,38 @@ def generate_square_subsequent_mask(
     return mask.to(device)
 
 
+def generate_ktoken_causal_mask(
+        sz: int,
+        k: int=5,
+        device=torch.device(torch._C._get_default_device()),
+        dtype="bool"):
+    """
+    Generates an upper-triangular matrix of True, with Falses on
+    diag and lower triangle. Thus, False represents attended indices.
+
+    Args:
+        sz: int
+            the size of the square mask
+        k: int
+            the number of tokens to include in the attention window.
+            This does not include the self-attention, so, the mask
+            actually has k+1 entries along each row.
+        device: int or str or None
+        dtype: str ("bool" or "float")
+    Returns:
+        BoolTensor (sz,sz)
+            False values in lower left including the diagonal
+    """
+    mask = torch.triu(torch.ones(sz, sz), diagonal=1).long()
+    submask = 1-torch.triu(torch.ones(sz, sz), diagonal=-k).long()
+    mask = (mask + submask).bool()
+    if dtype=="float" or dtype==float:
+        temp = mask
+        mask = torch.full((sz,sz), float("-inf"),device=device).float()
+        mask[~temp] = 0
+    return mask.to(device)
+
+
 def arglast(mask, dim=None, axis=-1):
     """
     This function finds the index of the last max value along a given
@@ -1026,10 +1058,15 @@ def rolling_window(array, window, time_axis=0):
 
 if __name__=="__main__":
     shape = (5,6)
+    sz = 10
+    k = 4
     for i in range(3):
-        startx = torch.randint(0,4,(5,))
-        endx = startx + torch.randint(1,4,(5,))
-        print("Strx:", startx)
-        print("Endx:", endx)
-        print(get_mask_between(shape, startx=startx, endx=endx+1).long())
+        window = k+i
+        mask = generate_ktoken_causal_mask(
+            sz=sz, k=window, dtype="float"
+        )
+        print("sz:", sz)
+        print("k:", window)
+        print(mask)
+        print(mask.long())
         print()

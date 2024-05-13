@@ -210,7 +210,7 @@ class SequenceModule(tmods.CoreModule):
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
                       tforce:bool=True,
-                      n_steps:int=1,
+                      n_steps:int=0,
                       temperature=None,
                       inputs_embeds:torch.Tensor=None,
                       input_ids=None,
@@ -850,7 +850,7 @@ class Transformer(SequenceModule):
                 the input embeddings. this must not be None if input_ids
                 is None. input_ids overrides this argument if both are
                 not None.
-            position_ids: None or LongTensor (B,S)
+            position_ids: None or LongTensor (S,)
                 optionally argue the position ids for the positional
                 encodings.
             output_attentions: bool
@@ -870,11 +870,17 @@ class Transformer(SequenceModule):
         )
 
         if past_key_values is not None and position_ids is None:
+            # we create the full position ids because this will be
+            # used for the keys if using rotary encoder attention module
             position_ids = torch.arange(
-                past_key_values[0][0].shape[-2],
                 past_key_values[0][0].shape[-2]+inputs_embeds.shape[1],
             ).long().to(self.get_device())
-        hidden_states = self.pos_encs(inputs_embeds, pids=position_ids)
+        pids = None
+        if position_ids is not None:
+            pids = position_ids[-inputs_embeds.shape[1]:]
+        hidden_states = self.pos_encs(
+                inputs_embeds,
+                pids=pids)
 
         past_key_value = None
         next_cache = [] if use_cache else None
@@ -892,6 +898,7 @@ class Transformer(SequenceModule):
                 past_key_value=past_key_value,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
+                position_ids=position_ids,
             )
             hidden_states = ret_dict["hidden_states"]
             if use_cache:
@@ -951,6 +958,7 @@ class Transformer(SequenceModule):
                    temperature=None,
                    hidden_states_only=False,
                    output_attentions=False,
+                   position_ids=None,
                    *args, **kwargs):
         """
         Arguments:
@@ -969,6 +977,9 @@ class Transformer(SequenceModule):
                 if true, will not bother computing the logits
             output_attentions: bool
                 if true, will return the attention weights
+            position_ids: None or LongTensor (S,)
+                optionally argue the position ids for the positional
+                encodings.
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S)
@@ -985,6 +996,7 @@ class Transformer(SequenceModule):
             use_cache=use_cache,
             past_key_values=past_key_values,
             output_attentions=output_attentions,
+            position_ids=position_ids,
         )
         if hidden_states_only:
             return {
@@ -1017,13 +1029,14 @@ class Transformer(SequenceModule):
                     inpts:torch.Tensor,
                     mask:torch.Tensor=None,
                     pad_mask:torch.Tensor=None,
-                    n_steps:int=1,
+                    n_steps:int=0,
                     incl_all_inpts:bool=False,
                     temperature=None,
                     inputs_embeds=None,
                     past_key_values=None,
                     stop_ids=None,
                     output_attentions=False,
+                    position_ids=None,
                     *args, **kwargs):
         """
         Arguments:
@@ -1057,6 +1070,9 @@ class Transformer(SequenceModule):
                 id
             output_attentions: bool
                 if true, will return the attention weights
+            position_ids: None or LongTensor (S,)
+                optionally argue the position ids for the positional
+                encodings.
         Returns:
             ret_dict: dict
                 "pred_ids": torch LongTensor (B,S+NSteps)
@@ -1121,6 +1137,14 @@ class Transformer(SequenceModule):
                     mask, (0, p, 0, p), value=True
                 )
 
+        # Positional indices
+        if position_ids is not None and position_ids.shape[-1]<S+n_steps:
+            device = device_fxn(position_ids.get_device())
+            p = S+n_steps - position_ids.shape[-1]
+            new_positions = torch.arange(p).to(device)
+            new_positions += position_ids[-1]
+            position_ids = torch.cat([position_ids,new_positions],dim=-1)
+
         # Need to ensure the padding mask is the full length of the
         # past_key_values if past_key_values is not none
         p_end = S
@@ -1130,6 +1154,7 @@ class Transformer(SequenceModule):
 
         h_states = []
         attentions = None
+        pids = None
 
         for step in range(n_loops):
             ## The masks are inverted at this point, 1 means do attend
@@ -1143,6 +1168,8 @@ class Transformer(SequenceModule):
                     attn_mask = mask[:,:e,:e]&padmask2attnmask(attn_mask)
                 else:
                     attn_mask = mask[:,:e,:e]
+            if position_ids is not None:
+                pids = position_ids[:e]
 
             output = self.encoder(
                 input_ids=inpt,
@@ -1150,6 +1177,7 @@ class Transformer(SequenceModule):
                 use_cache=True,
                 past_key_values=past_key_values,
                 inputs_embeds=inpt_emb,
+                position_ids=pids,
             )
             past_key_values = output.past_key_values
             if output_attentions:
@@ -1577,7 +1605,7 @@ class TorchTransformer(SequenceModule):
                 the input embeddings. this must not be None if input_ids
                 is None. input_ids overrides this argument if both are
                 not None.
-            position_ids: None or LongTensor (B,S)
+            position_ids: None or LongTensor (S,)
                 optionally argue the position ids for the positional
                 encodings.
             output_attentions: bool

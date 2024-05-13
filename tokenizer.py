@@ -341,6 +341,11 @@ class Tokenizer():
                 word2id[word] = tid 
                 id2word[tid] = word
 
+        if id2word is None: id2word = dict()
+        if word2id is None: word2id = dict()
+        if len(word2id)!=len(id2word):
+            word2id = {**{v:k for k,v in id2word.items()}, **word2id}
+            id2word = {**{v:k for k,v in word2id.items()}, **id2word}
         self.word2id = word2id
         self.id2word = id2word
 

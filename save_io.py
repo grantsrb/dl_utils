@@ -428,12 +428,32 @@ def get_hyps(folder):
     for name in ["hyperparams", "config"]:
         for ext in ["json", "yaml"]:
             f = os.path.join(folder, f"{name}.{ext}")
-            if os.path.exists(hyps_json):
+            if os.path.exists(f):
                 hyps = load_json_or_yaml(f)
                 return hyps
     return None
 
 def load_hyps(folder):
+    """
+    Returns a dict of the hyperparameters collected from the json
+    save file in the model folder.
+
+    folder: str
+        path to the folder that contains checkpts and a hyps json file
+    """
+    return get_hyps(folder)
+
+def load_config(folder):
+    """
+    Returns a dict of the hyperparameters collected from the json
+    save file in the model folder.
+
+    folder: str
+        path to the folder that contains checkpts and a hyps json file
+    """
+    return get_hyps(folder)
+
+def get_config(folder):
     """
     Returns a dict of the hyperparameters collected from the json
     save file in the model folder.

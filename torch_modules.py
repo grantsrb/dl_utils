@@ -937,22 +937,25 @@ class RotaryEmbedding(nn.Module):
         self.cos_cached = None
         self.sin_cached = None
 
-    def _build_cache(self, x: torch.tensor, offset=0):
+    def _build_cache(self, s: int, device=-1):
         """
         Args:
             x: torch Tensor (B,NHeads,Seq,D)
             offset: int
                 an value to effectively increase the position of x in
                 the sequence. This is helpful for using past_key_values
+        Returns:
+            None
         """
-        s = x.shape[-2]+offset
         if self.cos_cached is not None and s <= self.cos_cached.shape[0]:
+            self.cos_cached = self.cos_cached.to(device)
+            self.sin_cached = self.sin_cached.to(device)
             return
 
         denom = self.base ** (torch.arange(0, self.d, 2).float() / self.d)
-        theta = 1. / denom.to(x.device)
+        theta = 1. / denom.to(device)
 
-        seq_idx = torch.arange(s, device=x.device).float()
+        seq_idx = torch.arange(s, device=device).float()
 
         idx_theta = torch.einsum("n,d->nd", seq_idx, theta)
 
@@ -969,25 +972,37 @@ class RotaryEmbedding(nn.Module):
         d_2 = self.d//2
         return torch.cat([-x[...,d_2:], x[...,:d_2]], dim=-1)
 
-    def forward(self, x: torch.tensor, offset=0):
+    def forward(self, x: torch.tensor, offset=0, position_ids=None):
         """
         Args:
             x: torch Tensor (B,NHeads,Seq,D)
+            offset: int
+                the amount to offset the positional encodings by
+            position_ids: None or torch LongTensor (B,Seq)
+                optionally specify the positional indices for each token
+                respectively. The argued offset will be added to the
+                position_ids
         Returns:
             x_rope: torch Tensor (B,NHeads,Seq,D)
         """
         B,N,S,D = x.shape
-        self._build_cache(x, offset=offset)
+        device = device_fxn(x.get_device())
+        s = S+offset if position_ids is None else torch.max(position_ids)+1
+        self._build_cache(s=s, device=device)
         x_pass = None
         x_rope = x
         if self.d<x.shape[-1]:
             x_rope, x_pass = x[..., :self.d], x[...,self.d:]
         neg_half_x = self.neg_half(x_rope)
-        x_rope = (x_rope*self.cos_cached[offset:S+offset])
         # If you got an error here, you probably need a different sized
         # rotary dimension. Try arguing a power of 2 for d_model and
         # use an even number of attention heads.
-        x_rope = x_rope + (neg_half_x*self.sin_cached[offset:S+offset])
+        if position_ids is None:
+            x_rope = (x_rope*self.cos_cached[offset:S+offset])
+            x_rope = x_rope + (neg_half_x*self.sin_cached[offset:S+offset])
+        else:
+            x_rope = (x_rope*self.cos_cached[position_ids])
+            x_rope = x_rope + (neg_half_x*self.sin_cached[position_ids])
         if x_pass is not None:
             x_rope = torch.cat([x_rope, x_pass],dim=-1)
         return x_rope
@@ -1066,6 +1081,7 @@ class MultiHeadAttention(nn.Module):
             past_key_value=None,
             use_cache=False,
             output_attentions=False,
+            position_ids=None,
             *args,**kwargs):
         """
         Args:
@@ -1087,6 +1103,9 @@ class MultiHeadAttention(nn.Module):
                 if true, will return new past_key_values
             output_attentions: bool
                 if true, will return the unscaled attention weights.
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
         Returns:
             ret_dict:
                 "output": torch tensor (B,L,D)
@@ -1128,7 +1147,7 @@ class MultiHeadAttention(nn.Module):
 
         q = self.q_proj(q).reshape(B,L,N,P).permute(0,2,1,3)
 
-        q,k = self.emb_fxn(q,k)
+        q,k = self.emb_fxn(q,k, position_ids=position_ids)
 
         attn_out = F.scaled_dot_product_attention(
             query=q,key=k,value=v,attn_mask=attn_mask,is_causal=is_causal)
@@ -1216,10 +1235,20 @@ class RotaryAttention(MultiHeadAttention):
         if rot_dim is None: rot_dim = self.proj_dim
         self.rotary_emb = RotaryEmbedding(d=rot_dim)
 
-    def emb_fxn(self, q, k, *args, **kwargs):
+    def emb_fxn(self, q, k, position_ids=None, *args, **kwargs):
+        """
+        q: torch tensor (B,NHead,Length,P)
+        k: torch tensor (B,NHead,S,P)
+        position_ids: torch LongTensor (S)
+        """
         offset = k.shape[-2]-1 if k.shape[-2]!=q.shape[-2] else 0
-        q = self.rotary_emb(q, offset=offset)
-        k = self.rotary_emb(k)
+        if position_ids is not None:
+            position_ids = position_ids.long()
+            qpids = position_ids[-q.shape[-2]:]
+            q = self.rotary_emb(q, offset=0, position_ids=qpids)
+        else:
+            q = self.rotary_emb(q, offset=offset)
+        k = self.rotary_emb(k, position_ids=position_ids)
         return q, k
 
 
@@ -1285,7 +1314,8 @@ class SimpleEncoderLayer(nn.Module):
                   is_causal: bool = False,
                   past_key_value=None,
                   use_cache=False,
-                  output_attentions=False) -> Tensor:
+                  output_attentions=False,
+                  position_ids=None) -> Tensor:
         """
         Args:
             q: torch tensor (B,L,D)
@@ -1305,13 +1335,17 @@ class SimpleEncoderLayer(nn.Module):
                 if true, will return new past_key_values
             output_attentions: bool
                 if true, will return the unscaled attention weights
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
         """
         ret_dict = self.self_attn(q, kv, kv,
                            attn_mask=attn_mask,
                            is_causal=is_causal,
                            past_key_value=past_key_value,
                            use_cache=use_cache,
-                           output_attentions=output_attentions)
+                           output_attentions=output_attentions,
+                           position_ids=position_ids)
         ret_dict["output"] = self.dropout1(ret_dict["output"])
         return ret_dict
 
@@ -1322,7 +1356,9 @@ class SimpleEncoderLayer(nn.Module):
             is_causal: bool = False,
             past_key_value: tuple=None,
             use_cache: bool=False,
-            output_attentions=False) -> Tensor:
+            output_attentions=False,
+            position_ids=None,
+            *args, **kwargs) -> Tensor:
         r"""Pass the input through the encoder layer.
 
         Args:
@@ -1347,6 +1383,9 @@ class SimpleEncoderLayer(nn.Module):
                 computations.
             output_attentions: bool
                 if true, will return the unscaled attention weights
+            position_ids: None or LongTensor (B,S)
+                optionally argue the position ids for the positional
+                encodings.
         Returns:
             ret_dict:
                 "output": torch tensor (B,L,D)
@@ -1378,7 +1417,8 @@ class SimpleEncoderLayer(nn.Module):
                 is_causal=is_causal,
                 past_key_value=past_key_value,
                 use_cache=use_cache,
-                output_attentions=output_attentions,)
+                output_attentions=output_attentions,
+                position_ids=position_ids,)
             x = x + self._ff_block(self.norm2(x + attn_ret["output"]))
         else:
             attn_ret = self._ma_block(
@@ -1388,7 +1428,8 @@ class SimpleEncoderLayer(nn.Module):
                 is_causal=is_causal,
                 past_key_value=past_key_value,
                 use_cache=use_cache,
-                output_attentions=output_attentions,)
+                output_attentions=output_attentions,
+                position_ids=position_ids,)
             x = self.norm2(
                 x + self._ff_block(self.norm1(x + attn_ret["output"])))
         if use_cache:

@@ -463,6 +463,41 @@ def get_config(folder):
     """
     return get_hyps(folder)
 
+def load_init_checkpt(model, config):
+    """
+    Easily load a checkpoint into the model at initialization.
+
+    model: torch module
+    config: dict
+        "init_checkpt": str
+    """
+    init_checkpt = config.get("init_checkpt", None)
+    if init_checkpt is not None and init_checkpt.strip()!="":
+        if not os.path.exists(init_checkpt):
+            init_checkpt = os.path.join(config["save_root"], init_checkpt)
+        print("Initializing from checkpoint", init_checkpt)
+        checkpt = load_checkpoint(init_checkpt)
+        try:
+            model.load_state_dict(checkpt["state_dict"])
+        except:
+            print("Failed to load checkpt, attempting fix...")
+            sd = checkpt["state_dict"]
+            mskeys = set(model.state_dict().keys())
+            sym_diff = mskeys.symmetric_difference(set(sd.keys()))
+            if len(sym_diff)>0:
+                print("State Dict Symmetric Difference")
+                for k in sym_diff: 
+                    if k in mskeys:
+                        print("MODEL:", k, model.state_dict()[k].shape)
+                    else:
+                        print("CHECKPT:", k, sd[k].shape)
+
+            for key in sync_keys:
+                if key in model.state_dict():
+                    sd[key] = model.state_dict()[key]
+            model.load_state_dict(sd)
+    return model
+
 def exp_num_exists(exp_num, exp_folder):
     """
     Determines if the argued experiment number already exists for the

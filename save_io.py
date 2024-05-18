@@ -136,8 +136,8 @@ def foldersort(x):
             return int(s)
         except:
             pass
-    print("Folder sort splt:", x)
-    assert False
+    print("Failed to sort:", x)
+    return np.inf
 
 def prep_search_keys(s):
     """

@@ -503,6 +503,11 @@ class RNN(SequenceModule):
             embs = self.embeddings(inpts)
         else: embs = inputs_embeds
 
+        # TODO this if block needs testing
+        if pad_mask is None:
+            pad_mask = torch.zeros(
+                embs.shape[:2],device=self.get_device()).bool()
+
         B,S,D = embs.shape
         logits = []
         pred_ids = []
@@ -1896,6 +1901,7 @@ class MambaModel(SequenceModule):
             learnable=self.learn_posencs,
         )
         self.layers = torch.nn.ModuleList([])
+        self.lnorms = torch.nn.ModuleList([])
         for el in range(self.n_layers):
             self.layers.append(Mamba(
                 d_model=self.d_model,
@@ -1913,6 +1919,7 @@ class MambaModel(SequenceModule):
                 use_fast_path=use_fast_path,
                 layer_idx=el,
             ))
+            self.lnorms.append(nn.LayerNorm(self.d_model))
         #self.decoder = nn.LayerNorm(self.d_model)
         #self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         d_hid = self.d_model*4
@@ -1975,9 +1982,9 @@ class MambaModel(SequenceModule):
         if hs is None: hs = self.state
 
         # Loop through mamba layers of model
-        for l,layer in enumerate(self.layers):
+        for l,(layer,norm) in enumerate(zip(self.layers,self.lnorms)):
             out = layer(inpt, inference_params=hs)
-            inpt = out
+            inpt = norm(inpt + out)
         logits = self.lm_head(self.decoder(out))
         pred_ids = self.sample_with_temperature(logits, temperature )
         hs.seqlen_offset += inpt.shape[1]
@@ -2300,7 +2307,7 @@ class EmptyTokenizer:
 
 def make_model(config):
     config["encoder_layer_class"] = "RotaryEncoderLayer"
-    model = globals()[config.get("model_type","Transformer")](**config)
+    model = globals()[config.get("model_type","MambaModel")](**config)
     #model = globals()[config.get("model_type","LinearRNN")](**config)
     return LossWrapper(model=model, config=config, **config)
 

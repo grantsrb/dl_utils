@@ -6,6 +6,7 @@ import time
 from collections import deque
 import select
 import shutil
+import copy
 import torch.multiprocessing as mp
 
 import dl_utils.save_io as io
@@ -367,51 +368,64 @@ def run_training(train_fxn):
     print("\nSearching over:")
     print("\n".join(["{}: {}".format(k,v) for k,v in ranges.items()]))
 
-    config["exp_name"] = config.get('exp_name', "myexp")
-    exp_folder = config['exp_name']
-    if "save_root" in config:
-        config['save_root'] = os.path.expanduser(config['save_root'])
-        if not os.path.exists(config['save_root']):
-            os.mkdir(config['save_root'])
-        exp_folder = os.path.join(config['save_root'], exp_folder)
-    print("Main Exp Folder:", exp_folder)
-    sleep_time = 8
-    if os.path.exists(exp_folder):
-        dirs = io.get_model_folders(exp_folder)
-        if len(dirs) > 0:
-            s = "Overwrite last folder {}? (No/yes)".format(dirs[-1])
-            print(s)
-            i,_,_ = select.select([sys.stdin], [],[],sleep_time)
-            if i and "y" in sys.stdin.readline().strip().lower():
-                print("Are you sure?? This will delete the data (Y/n)")
+    exp_names = [config.get('exp_name', "myexp")]
+    for k in ranges.keys():
+        if type(ranges[k])==dict:
+            if "exp_name" in ranges[k]:
+                exp_names = list(set(ranges[k]["exp_name"]))
+                if len(exp_names)>1: raise NotImplemented
+    if "exp_name" in ranges:
+        exp_names = ranges["exp_name"]
+    og_config = copy.deepcopy(config)
+    og_ranges = copy.deepcopy(ranges)
+    for exp_name in exp_names:
+        ranges = copy.deepcopy(og_ranges)
+        config = copy.deepcopy(og_config)
+        config["exp_name"] = exp_name
+        exp_folder = exp_name
+        if "save_root" in config:
+            config['save_root'] = os.path.expanduser(config['save_root'])
+            if not os.path.exists(config['save_root']):
+                os.mkdir(config['save_root'])
+            exp_folder = os.path.join(config['save_root'], exp_folder)
+        print("Main Exp Folder:", exp_folder)
+        sleep_time = 8
+        if os.path.exists(exp_folder):
+            dirs = io.get_model_folders(exp_folder)
+            if len(dirs) > 0:
+                s = "Overwrite last folder {}? (No/yes)".format(dirs[-1])
+                print(s)
                 i,_,_ = select.select([sys.stdin], [],[],sleep_time)
-                if i and "n" not in sys.stdin.readline().strip().lower():
-                    path = os.path.join(exp_folder, dirs[-1])
-                    shutil.rmtree(path, ignore_errors=True)
+                if i and "y" in sys.stdin.readline().strip().lower():
+                    print("Are you sure?? This will delete the data (Y/n)")
+                    i,_,_ = select.select([sys.stdin], [],[],sleep_time)
+                    if i and "n" not in sys.stdin.readline().strip().lower():
+                        path = os.path.join(exp_folder, dirs[-1])
+                        shutil.rmtree(path, ignore_errors=True)
+            else:
+                s = "You have {} seconds to cancel experiment name {}:"
+                print(s.format(sleep_time, config['exp_name']))
+                i,_,_ = select.select([sys.stdin], [],[],sleep_time)
         else:
             s = "You have {} seconds to cancel experiment name {}:"
             print(s.format(sleep_time, config['exp_name']))
             i,_,_ = select.select([sys.stdin], [],[],sleep_time)
-    else:
-        s = "You have {} seconds to cancel experiment name {}:"
-        print(s.format(sleep_time, config['exp_name']))
-        i,_,_ = select.select([sys.stdin], [],[],sleep_time)
-    print()
+        print()
 
-    keys = list(ranges.keys())
-    start_time = time.time()
+        keys = list(ranges.keys())
+        start_time = time.time()
 
-    # Make results file
-    exp_folder = config['exp_name']
-    if "save_root" in config:
-        config['save_root'] = os.path.expanduser(config['save_root'])
-        if not os.path.exists(config['save_root']):
-            os.mkdir(config['save_root'])
-        exp_folder = os.path.join(config['save_root'], exp_folder)
-    config["exp_folder"] = exp_folder
-    if not os.path.exists(exp_folder):
-        os.mkdir(exp_folder)
+        # Make results file
+        exp_folder = config['exp_name']
+        if "save_root" in config:
+            config['save_root'] = os.path.expanduser(config['save_root'])
+            if not os.path.exists(config['save_root']):
+                os.mkdir(config['save_root'])
+            exp_folder = os.path.join(config['save_root'], exp_folder)
+        config["exp_folder"] = exp_folder
+        if not os.path.exists(exp_folder):
+            os.mkdir(exp_folder)
 
-    hyper_search(config, ranges, train_fxn)
+        hyper_search(config, ranges, train_fxn)
     print("Total Execution Time:", time.time() - start_time)
 

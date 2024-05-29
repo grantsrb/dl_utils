@@ -201,7 +201,9 @@ def fill_hyper_q(config, hyp_ranges, keys, hyper_q, idx=0):
         # Load q
         config['search_keys'] = ""
         for k in keys:
-            if isinstance(hyp_ranges[k],dict):
+            if k=="exp_name":
+                config["search_keys"] += "_expname"
+            elif isinstance(hyp_ranges[k],dict):
                 for rk in hyp_ranges[k].keys():
                     s = io.prep_search_keys(str(config[rk]))
                     config['search_keys'] += "_" + str(rk)+s

@@ -336,6 +336,21 @@ def hyper_search(config, hyp_ranges, train_fxn):
         else:
             train_fxn(0, config=config, verbose=verbose)
 
+def simple_parse(value):
+    value = str(value)
+    try:
+        if value[-1].isnumeric():
+            if "." in value:
+                return float(value)
+            return int(value)
+        elif value.lower() in {"false", "true"}:
+            value = value.lower()=="true"
+        elif value[0]=="[":
+            raise NotImplemented
+    except:
+        pass
+    return value
+
 def run_training(train_fxn):
     """
     This function extracts the hyperparams and hyperranges from the
@@ -356,8 +371,16 @@ def run_training(train_fxn):
     if len(sys.argv) < 3:
         ranges = {"lr": [config['lr']]}
     else:
-        ranges = io.load_json_or_yaml(sys.argv[2])
-        print("Using hyperranges file:", sys.argv[2])
+        ranges = None
+        for arg in sys.argv[2:]:
+            if ".yaml" in arg or ".json" in arg:
+                print("Using hyperranges file:", sys.argv[2])
+                ranges = load_json_or_yaml(arg)
+            elif "=" in arg:
+                splt = arg.split("=")
+                config[splt[0]] = simple_parse(splt[1])
+        if ranges is None:
+            ranges = {"lr": [config['lr']]}
     print()
 
     keys = sorted(list(config.keys()))

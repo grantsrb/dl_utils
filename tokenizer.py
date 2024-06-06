@@ -236,6 +236,10 @@ def get_sent_arr(document, start_token="|<BOS>|",
     return tok_list
 
 class Tokenizer():
+    pad_token = "<PAD>"
+    bos_token = "<BOS>"
+    eos_token = "<EOS>"
+    unk_token = "<UNK>"
     """
     This class assists in tokenizing the data and converting between
     indices and tokens.
@@ -290,10 +294,15 @@ class Tokenizer():
             strings to use as delimeters in the tokenization. if None,
             defaults to spaces.
         """
-        self.pad_token = pad_token
-        self.bos_token = bos_token
-        self.eos_token = eos_token
-        self.delimeters = delimeters
+        self.pad_token = Tokenizer.pad_token
+        self.bos_token = Tokenizer.bos_token
+        self.eos_token = Tokenizer.eos_token
+        if pad_token and pad_token != Tokenizer.pad_token:
+            self.pad_token = pad_token
+        if bos_token and bos_token != Tokenizer.bos_token:
+            self.bos_token = bos_token
+        if eos_token and eos_token != Tokenizer.eos_token:
+            self.eos_token = eos_token
         self.special_tokens = {
             "pad_token": self.pad_token,
             "bos_token": self.bos_token,

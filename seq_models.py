@@ -435,31 +435,36 @@ class RNN(SequenceModule):
             logits = prev_logits.detach().data.clone()
 
         if inputs_embeds is None:
-            inpt = self.embeddings(inpts)[idx]
-        else: inpt = inputs_embeds[idx]
+            inpt = self.embeddings(inpts)
+        else: inpt = inputs_embeds
         
-        new_hs = [ h.clone() for h in hs ]
+        new_hs = [] # h.clone() for h in hs ]
         if self.l_norm:
             inpt = self.pre_norm(inpt)
         if len(inpt)>0:
             # Loop through rnn layers of model
             for l in range(len(self.rnns)):
-                rnn = self.rnns[l]
-                h = hs[l][idx]
-                h = rnn(inpt, h)
-                if self.h_norm or self.l_norm:
-                    h = self.layer_norms[l](h)
+                h = self.step_core(
+                    inpt=inpt, h=hs[l], layer=l, idx=idx)
                 inpt = h
-                new_hs[l][idx] = h
-            logits[idx] = self.lm_head(self.decoder(inpt))
+                new_hs.append(h)
+            logits[idx]   = self.lm_head(self.decoder(inpt[idx]))
             pred_ids[idx] = self.sample_with_temperature(
-                logits[idx], temperature
+                logits[idx].data, temperature
             )
         return {
             "logits":   logits,
             "pred_ids": pred_ids,
             "hs": new_hs, 
         }
+
+    def step_core(self, inpt, h, layer, idx):
+        hcopy = h.clone()
+        h = self.rnns[layer](inpt[idx], h[idx])
+        if self.h_norm or self.l_norm:
+            h = self.layer_norms[layer](h)
+        hcopy[idx] = h
+        return hcopy
 
     def forward(self, inpts:torch.Tensor,
                       pad_mask:torch.Tensor=None,
@@ -630,25 +635,25 @@ class LSTM(RNN):
             logits = prev_logits.detach().data.clone()
 
         if inputs_embeds is None:
-            inpt = self.embeddings(inpts)[idx]
-        else: inpt = inputs_embeds[idx]
+            inpt = self.embeddings(inpts)
+        else: inpt = inputs_embeds
         
-        new_hs = [ h.clone() for h in hs ]
-        new_cs = [ c.clone() for c in cs ]
+        new_hs = [] #h.clone() for h in hs ]
+        new_cs = [] #c.clone() for c in cs ]
         if self.l_norm:
             inpt = self.pre_norm(inpt)
         if len(inpt)>0:
             # Loop through lstm layers of model
             for l in range(len(self.rnns)):
-                lstm = self.rnns[l]
-                h,c = (hs[l][idx], cs[l][idx])
-                h,c = lstm(inpt, (h,c))
-                if self.h_norm or self.l_norm:
-                    h = self.layer_norms[l](h)
+                (h,c) = self.step_core(
+                    inpt=inpt,
+                    h=(hs[l],cs[l]),
+                    layer=l,
+                    idx=idx)
                 inpt = h
-                new_hs[l][idx] = h
-                new_cs[l][idx] = c
-            logits[idx] = self.lm_head(self.decoder(inpt))
+                new_hs.append(h)
+                new_cs.append(c)
+            logits[idx] = self.lm_head(self.decoder(inpt[idx]))
             pred_ids[idx] = self.sample_with_temperature(
                 logits[idx], temperature
             )
@@ -658,6 +663,20 @@ class LSTM(RNN):
             "hs": new_hs, 
             "cs": new_cs,
         }
+
+    def step_core(self, inpt, h, layer, idx):
+        """
+        This function is meant to allow for easier DAS interventions
+        """
+        hcopy = [h[0].clone(), h[1].clone()]
+        h = self.rnns[layer](inpt[idx], (h[0][idx], h[1][idx]))
+        if self.h_norm or self.l_norm:
+            h,c = h
+            h = self.layer_norms[layer](h)
+            h = (h,c)
+        hcopy[0][idx] = h[0]
+        hcopy[1][idx] = h[1]
+        return hcopy
 
     def forward(self, inpts:torch.Tensor,
                       pad_mask:torch.Tensor=None,
@@ -2307,7 +2326,7 @@ class EmptyTokenizer:
 
 def make_model(config):
     config["encoder_layer_class"] = "RotaryEncoderLayer"
-    model = globals()[config.get("model_type","MambaModel")](**config)
+    model = globals()[config.get("model_type","LSTM")](**config)
     #model = globals()[config.get("model_type","LinearRNN")](**config)
     return LossWrapper(model=model, config=config, **config)
 

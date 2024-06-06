@@ -407,9 +407,29 @@ def config_error_catching(config):
     )
     return config
 
+def parse(value):
+    value = str(value)
+    try:
+        if value[-1].isnumeric():
+            if "." in value:
+                return float(value)
+            return int(value)
+        elif value.lower() in {"false", "true"}:
+            value = value.lower()=="true"
+    except:
+        pass
+    return value
+
 if __name__=="__main__":
     config = { }
     if len(sys.argv)>1:
-        config = load_json_or_yaml(sys.argv[1])
+        config = {}
+        for arg in  sys.argv[1:]:
+            if ".yaml" in arg or ".json" in arg:
+                config = {**config, **load_json_or_yaml(arg)}
+            elif "=" in arg:
+                splt = arg.split("=")
+                config[splt[0]] = parse(splt[1])
+            
     train(0, config)
 

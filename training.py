@@ -375,7 +375,7 @@ def run_training(train_fxn):
         for arg in sys.argv[2:]:
             if ".yaml" in arg or ".json" in arg:
                 print("Using hyperranges file:", sys.argv[2])
-                ranges = load_json_or_yaml(arg)
+                ranges = io.load_json_or_yaml(arg)
             elif "=" in arg:
                 splt = arg.split("=")
                 config[splt[0]] = simple_parse(splt[1])

@@ -134,8 +134,8 @@ class CausalDataset(torch.utils.data.Dataset):
             self.inpt_seqs = torch.LongTensor(self.inpt_seqs)
             if self.labels is not None:
                 if type(self.labels)==dict:
-                    self.outp_seqs = TensorDict({
-                      k: torch.from_numpy(v) for k,v in self.outp_seqs.items()
+                    self.labels = TensorDict({
+                      k: torch.LongTensor(v) for k,v in self.labels.items()
                     }, batch_size=len(self.inpt_seqs))
             if self.masks is not None:
                 for k in self.masks:
@@ -220,13 +220,15 @@ class CausalDataset(torch.utils.data.Dataset):
             masks["output_pad_mask"] = m
 
         ret_dict = {
-            "input_ids":input_ids,
-            "output_ids":output_ids,
-            **masks,}
+            "input_ids": input_ids,
+            "output_ids": output_ids,
+            **masks,
+        }
         if self.labels is None: return ret_dict
 
         ## Labels
-        ret_dict["labels"] = self.labels[idx]
+        for k in self.labels.keys():
+            ret_dict[k] = self.labels[k][idx]
         return ret_dict
 
 

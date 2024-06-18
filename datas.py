@@ -2,6 +2,7 @@ import pickle
 import dl_utils.tokenizer
 from dl_utils.utils import rolling_window
 import torch
+from tensordict import TensorDict
 import numpy as np
 from tqdm import tqdm
 import os
@@ -26,12 +27,13 @@ class CausalDataset(torch.utils.data.Dataset):
                 should be a number of sequences that are already
                 tokenized in id form. If concat is false, all of the
                 sequences should be the same length.
-            labels: None or same as data
-                optionally argue labels in addition to the data.
-                These will be used as the output sequences. This argument
-                should be a number of sequences that are already
-                tokenized in id form. If concat is false, all of the
-                sequences should be the same length.
+            labels: None or str or dict or tensordict
+                If labels is not none and data is a string, labels
+                should also be a string. The value of the labels should
+                be a dict or a tensor dict of labels. If a dict is
+                argued, assumes values are ndarrays. Currently
+                incompatible with concat. Any shape is legal as long
+                as the batch dimension matches.
             masks: None or same as data or dict
                 optionally boolean masks. If a dict is argued, will assume
                 that all values are masks of the same shape and type as
@@ -83,15 +85,17 @@ class CausalDataset(torch.utils.data.Dataset):
                                 masks[k] = pickle.load(f)
 
         self.inpt_seqs = data
-        self.outp_seqs = labels
+        self.labels = labels
         self.masks = masks
         if self.masks is not None and type(self.masks)!=dict:
             self.masks = { "mask": self.masks }
 
-        if self.concat and self.dynamic_concat:
-            self.og_seqs = data
-            self.og_labels = labels
-            self.og_masks = {**self.masks}
+        if self.concat:
+            assert type(self.labels)!=TensorDict
+            if self.dynamic_concat:
+                self.og_seqs = data
+                self.og_labels = labels
+                self.og_masks = {**self.masks}
 
         if self.seq_len is None:
             if self.concat:
@@ -101,15 +105,18 @@ class CausalDataset(torch.utils.data.Dataset):
         if hasattr(self.inpt_seqs, "shape") and self.concat:
             B,S = self.inpt_seqs.shape
             self.inpt_seqs = self.inpt_seqs.reshape(B*S,-1).squeeze()
-            if self.outp_seqs is not None:
-                self.outp_seqs = self.outp_seqs.reshape(B*S,-1).squeeze()
+            if self.labels is not None:
+                self.labels = self.labels.reshape(B*S,-1).squeeze()
             if self.masks is not None:
                 for k in self.masks:
                     self.masks[k] = self.masks[k].reshape(B*S,-1).squeeze()
-        if type(self.inpt_seqs)==type(np.zeros((1,))):
+        ndarr = type(np.zeros((1,)))
+        if type(self.inpt_seqs)==ndarr:
             self.inpt_seqs = torch.LongTensor(self.inpt_seqs)
-            if self.outp_seqs is not None:
-                self.outp_seqs = torch.LongTensor(self.outp_seqs)
+            if self.labels is not None and type(self.labels)==dict:
+                self.labels = TensorDict({
+                    k: torch.from_numpy(v) for k,v in self.labels.items()
+                }, batch_size=len(self.inpt_seqs))
             if self.masks is not None:
                 for k in self.masks:
                     self.masks[k] = torch.BoolTensor(self.masks[k])
@@ -118,10 +125,6 @@ class CausalDataset(torch.utils.data.Dataset):
                 seqs = []
                 for seq in self.inpt_seqs: seqs += seq
                 self.inpt_seqs = torch.LongTensor(seqs)
-                if self.outp_seqs is not None:
-                    seqs = []
-                    for seq in self.outp_seqs: seqs += seq
-                    self.outp_seqs = torch.LongTensor(seqs)
                 if self.masks is not None:
                     for k in self.masks:
                         seqs = []
@@ -129,8 +132,11 @@ class CausalDataset(torch.utils.data.Dataset):
                         self.masks[k] = torch.BoolTensor(seqs)
         else:
             self.inpt_seqs = torch.LongTensor(self.inpt_seqs)
-            if self.outp_seqs is not None:
-                self.outp_seqs = torch.LongTensor(self.outp_seqs)
+            if self.labels is not None:
+                if type(self.labels)==dict:
+                    self.outp_seqs = TensorDict({
+                      k: torch.from_numpy(v) for k,v in self.outp_seqs.items()
+                    }, batch_size=len(self.inpt_seqs))
             if self.masks is not None:
                 for k in self.masks:
                     self.masks[k] = torch.BoolTensor(self.masks[k])
@@ -150,9 +156,6 @@ class CausalDataset(torch.utils.data.Dataset):
         samps = [i for i in self.inpt_seqs[ridx]]
         samps += [i for i in self.inpt_seqs[idx]]
         out_samps = None
-        if self.outp_seqs is not None:
-            out_samps = [i for i in self.outp_seqs[ridx]]
-            out_samps += [i for i in self.outp_seqs[idx]]
         masks = {k: [i for i in self.masks[k][ridx]] for k in self.masks}
         for k in masks:
             masks[k] += [i for i in self.masks[k][idx]]
@@ -160,8 +163,6 @@ class CausalDataset(torch.utils.data.Dataset):
         while len(samps) < end_len:
             ridx = np.random.randint(len(self.inpt_seqs))
             samps += [i for i in self.inpt_seqs[ridx]]
-            if self.outp_seqs is not None:
-                out_samps += [i for i in self.outp_seqs[ridx]]
             for k in masks:
                 masks[k] += [i for i in self.masks[k][ridx]]
 
@@ -200,17 +201,8 @@ class CausalDataset(torch.utils.data.Dataset):
             samp = self.inpt_seqs[idx:idx+self.seq_len]
         else:
             samp = self.inpt_seqs[idx]
-        input_ids = samp
-
-        ## Outputs
-        if self.outp_seqs is None:
-            input_ids = samp[:-1]
-            output_ids = samp[1:]
-        else:
-            if self.concat:
-                output_ids = self.outp_seqs[idx:idx+self.seq_len]
-            else:
-                output_ids = self.outp_seqs[idx]
+        input_ids = samp[:-1]
+        output_ids = samp[1:]
 
         ## Masks
         masks = dict() if self.masks is None else\
@@ -227,12 +219,16 @@ class CausalDataset(torch.utils.data.Dataset):
             m = (output_ids==self.pad_id)|(output_ids==self.bos_id)
             masks["output_pad_mask"] = m
 
-        #print("input_ids", input_ids.shape)
-        #print("output_ids", output_ids.shape)
-        #for m in masks:
-        #    print(m, masks[m].shape)
-        #assert False
-        return {"input_ids":input_ids, "output_ids":output_ids, **masks,}
+        ret_dict = {
+            "input_ids":input_ids,
+            "output_ids":output_ids,
+            **masks,}
+        if self.labels is None: return ret_dict
+
+        ## Labels
+        ret_dict["labels"] = self.labels[idx]
+        return ret_dict
+
 
 def get_datasets(config):
     """

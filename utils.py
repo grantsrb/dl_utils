@@ -11,6 +11,7 @@ except:
     pass
 
 def device_fxn(device):
+    if type(device)==str: return device
     if device<0: return "cpu"
     return device
 
@@ -277,6 +278,13 @@ def get_one_hot(ids, L):
     Returns:
         one_hots: torch long tensor (..., N, L)
     """
+    to_list = False
+    if type(ids)==list:
+        to_list = True
+        ids = torch.LongTensor(ids)
+    ignores = ids<0
+    if torch.any(ignores):
+        ids[ignores] = 0
     shape = [*ids.shape, L]
     device = ids.get_device()
     if device<0: device = "cpu"
@@ -286,7 +294,14 @@ def get_one_hot(ids, L):
         index=ids[...,None],
         src=torch.ones_like(one_hots)
     )
+    if torch.any(ignores):
+        one_hots[ignores] = 0
+    if to_list:
+        one_hots = one_hots.tolist()
     return one_hots
+
+def get_one_hots(*args, **kwargs):
+    return get_one_hot(*args, **kwargs)
 
 def get_mask_past_id(src, id_, incl_id=False):
     """

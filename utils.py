@@ -271,6 +271,8 @@ def num2base(n, b):
 
 def get_one_hot(ids, L):
     """
+    Ignores ids that are less than 0.
+
     Args:
         ids: torch long tensor (..., N)
         L: int

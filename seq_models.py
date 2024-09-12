@@ -1260,9 +1260,7 @@ class HFTransformer(SequenceModule):
             temp_model = AutoModelForCausalLM.from_pretrained(
                 self.hf_model_type
             )
-            self.encoder = tmods.FlexibleLlamaModel(
-                temp_model.config
-            )
+            self.encoder = tmods.FlexibleLlamaModel(temp_model.config)
             self.encoder.load_state_dict(temp_model.state_dict())
 
             print("Properties:")

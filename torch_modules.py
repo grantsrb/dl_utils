@@ -36,6 +36,7 @@ except:
             past_key_values=None,
             hidden_states=None,
             attentions=None,
+            loss=None,
             ):
             """
             Hacky way to avoid needing import
@@ -43,6 +44,7 @@ except:
             self.last_hidden_state = last_hidden_state
             self.past_key_values = past_key_values
             self.hidden_states = hidden_states
+            self.loss = loss
 
 from torch import Tensor
 from typing import List, Optional, Tuple, Union

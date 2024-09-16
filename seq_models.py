@@ -281,21 +281,21 @@ class SequenceModule(tmods.CoreModule):
                         inputs_embeds.shape[:2]
                     ).bool().to( self.get_device() )
 
-        #### TODO: DELETME
-        #Right now adding a custom mask for debugging purposes
-        if mask is None:
-            if inpts is None:
-                S = inputs_embeds.shape[1]
-            else:
-                S = inpts.shape[1]
-            if past_key_values is not None:
-                S += past_key_values[0][0].shape[2]
-            if not tforce:
-                S += n_steps
-            mask = generate_square_subsequent_mask(S)[None]
-            mask = mask.to(self.get_device())
-        ###pad_mask = None
-        ### TODO: END DELETE
+        ##### TODO: DELETME
+        ##Right now adding a custom mask for debugging purposes
+        #if mask is None:
+        #    if inpts is None:
+        #        S = inputs_embeds.shape[1]
+        #    else:
+        #        S = inpts.shape[1]
+        #    if past_key_values is not None:
+        #        S += past_key_values[0][0].shape[2]
+        #    if not tforce:
+        #        S += n_steps
+        #    mask = generate_square_subsequent_mask(S)[None]
+        #    mask = mask.to(self.get_device())
+        ####pad_mask = None
+        #### TODO: END DELETE
 
         if tforce:
             ret_dict = self.tforce_fwd(

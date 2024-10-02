@@ -283,17 +283,17 @@ class SequenceModule(tmods.CoreModule):
 
         ##### TODO: DELETME
         ##Right now adding a custom mask for debugging purposes
-        #if mask is None:
-        #    if inpts is None:
-        #        S = inputs_embeds.shape[1]
-        #    else:
-        #        S = inpts.shape[1]
-        #    if past_key_values is not None:
-        #        S += past_key_values[0][0].shape[2]
-        #    if not tforce:
-        #        S += n_steps
-        #    mask = generate_square_subsequent_mask(S)[None]
-        #    mask = mask.to(self.get_device())
+        if mask is None:
+            if inpts is None:
+                S = inputs_embeds.shape[1]
+            else:
+                S = inpts.shape[1]
+            if past_key_values is not None:
+                S += past_key_values[0][0].shape[2]
+            if not tforce:
+                S += n_steps
+            mask = generate_square_subsequent_mask(S)[None]
+            mask = mask.to(self.get_device())
         ####pad_mask = None
         #### TODO: END DELETE
 
@@ -784,6 +784,7 @@ class Transformer(SequenceModule):
                 activation=F.gelu,
                 batch_first=True,
                 norm_first=True,
+                llama=kwargs.get("llama", False),
             ))
         self.decoder = nn.LayerNorm(self.d_model)
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)

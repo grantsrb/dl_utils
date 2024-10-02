@@ -998,7 +998,7 @@ class RotaryEmbedding(nn.Module):
         neg_half_x = self.neg_half(x_rope)
         # If you got an error here, you probably need a different sized
         # rotary dimension. Try arguing a power of 2 for d_model and
-        # use an even number of attention heads.
+        # use one or an even number of attention heads.
         if position_ids is None:
             x_rope = (x_rope*self.cos_cached[offset:S+offset])
             x_rope = x_rope + (neg_half_x*self.sin_cached[offset:S+offset])
@@ -1220,6 +1220,59 @@ class ScaledDotProductAttn(nn.Module):
 
         return ret_dict
 
+#class RotaryEmbeddingWrapper(nn.Module):
+#    """
+#    Wrapper to make interventions easier
+#    """
+#    def __init__(self, rotary_emb, *args, **kwargs):
+#        super().__init__()
+#        self.rotary_emb = rotary_emb
+#
+#    def forward(self, q, k, position_ids=None, *args, **kwargs):
+#        """
+#        q: torch tensor (B,NHead,Length,P)
+#        k: torch tensor (B,NHead,S,P)
+#        position_ids: torch LongTensor (S)
+#        """
+#        offset = k.shape[-2]-1 if k.shape[-2]!=q.shape[-2] else 0
+#        if position_ids is not None:
+#            position_ids = position_ids.long()
+#            qpids = position_ids[-q.shape[-2]:]
+#            q = self.rotary_emb(q, offset=0, position_ids=qpids)
+#        else:
+#            q = self.rotary_emb(q, offset=offset)
+#        k = self.rotary_emb(k, position_ids=position_ids)
+#        return q, k
+#
+#class RotaryAttention(MultiHeadAttention):
+#    def __init__(self, rot_dim=None, *args, **kwargs):
+#        """
+#        A multiheaded self-attention module that uses rotary encodings.
+#
+#        Args:
+#            see MultiHeadAttention for args and kwargs
+#
+#            rot_dim: int
+#                the number of dimensions to use for the rotary encodings.
+#                Must be divisible by 2 and must be less than or equal to
+#                d_model//n_heads.
+#        """
+#        super().__init__(*args, **kwargs)
+#        if rot_dim is None: rot_dim = self.proj_dim
+#        self.rotary_emb = RotaryEmbedding(d=rot_dim)
+#        self.rotary_emb_wrapper = RotaryEmbeddingWrapper(self.rotary_emb)
+#
+#    def emb_fxn(self, q, k, position_ids=None, *args, **kwargs):
+#        """
+#        q: torch tensor (B,NHead,Length,P)
+#        k: torch tensor (B,NHead,S,P)
+#        position_ids: torch LongTensor (S)
+#        """
+#        return self.rotary_emb_wrapper(
+#            q=q, k=k, position_ids=position_ids, *args, **kwargs)
+
+
+
 class RotaryAttention(MultiHeadAttention):
     def __init__(self, rot_dim=None, *args, **kwargs):
         """
@@ -1268,6 +1321,7 @@ class SimpleEncoderLayer(nn.Module):
             norm_first=True,
             bias=True,
             layer_norm_eps=1e-5,
+            llama=False,
             device=None,
             dtype=None,
             *args, **kwargs):
@@ -1280,6 +1334,7 @@ class SimpleEncoderLayer(nn.Module):
             batch_first: bool
         """
         super().__init__()
+        self.llama = llama
         factory_kwargs = {"device": device, "dtype": dtype}
         self.self_attn = MultiHeadAttention(
             d_model=d_model,
@@ -1297,6 +1352,11 @@ class SimpleEncoderLayer(nn.Module):
             dim_feedforward, d_model, bias=bias, **factory_kwargs)
 
         self.norm_first = norm_first
+        #if self.llama:
+        #    self.norm1 = nn.RMSNorm( d_model, **factory_kwargs)
+        #    self.norm2 = nn.RMSNorm( d_model, **factory_kwargs)
+        #    print("Using llama!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        #else:
         self.norm1 = nn.LayerNorm(
             d_model, eps=layer_norm_eps, **factory_kwargs)
         self.norm2 = nn.LayerNorm(
@@ -1410,7 +1470,21 @@ class SimpleEncoderLayer(nn.Module):
             src_key_padding_mask = ~src_key_padding_mask
 
         x = src
-        if self.norm_first:
+        if self.llama:
+            # Llama Architecture
+            norm_x = self.norm1(x)
+            attn_ret = self._ma_block(
+                q=norm_x,
+                kv=norm_x,
+                attn_mask=src_mask,
+                is_causal=is_causal,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                position_ids=position_ids,)
+            x = x + attn_ret["output"]
+            x = x + self._ff_block(self.norm2(x))
+        elif self.norm_first:
             x = self.norm1(x)
             attn_ret = self._ma_block(
                 q=x,
@@ -1421,7 +1495,8 @@ class SimpleEncoderLayer(nn.Module):
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 position_ids=position_ids,)
-            x = x + self._ff_block(self.norm2(x + attn_ret["output"]))
+            x = self.norm2(x + attn_ret["output"])
+            x = x + self._ff_block(x)
         else:
             attn_ret = self._ma_block(
                 q=x,
@@ -1432,8 +1507,8 @@ class SimpleEncoderLayer(nn.Module):
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 position_ids=position_ids,)
-            x = self.norm2(
-                x + self._ff_block(self.norm1(x + attn_ret["output"])))
+            x = self.norm1(x + attn_ret["output"])
+            x = self.norm2(x + self._ff_block(x))
         if use_cache:
             ret_dict["past_key_value"] = attn_ret["past_key_value"]
         if output_attentions:

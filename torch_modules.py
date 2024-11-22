@@ -1064,6 +1064,10 @@ class MultiHeadAttention(nn.Module):
 
         self.sdp_attn = ScaledDotProductAttn()
 
+        self.q_identity = IdentityModule()
+        self.k_identity = IdentityModule()
+        self.v_identity = IdentityModule()
+
     def init_weights(self,):
         nn.init.xavier_uniform_(self.q_proj.weight)
         nn.init.xavier_uniform_(self.k_proj.weight)
@@ -1126,8 +1130,12 @@ class MultiHeadAttention(nn.Module):
         B,S,K = k.shape
         B,S,V = v.shape
 
+        q = self.q_proj(q).reshape(B,L,N,P).permute(0,2,1,3)
         k = self.k_proj(k).reshape(B,S,N,P).permute(0,2,1,3)
         v = self.v_proj(v).reshape(B,S,N,P).permute(0,2,1,3)
+        v = self.v_identity(v)
+        k = self.k_identity(k)
+        q = self.q_identity(q)
 
         if past_key_value is not None:
             # Assumes past_key_value = k or v; (B,N,S1,P)
@@ -1147,7 +1155,6 @@ class MultiHeadAttention(nn.Module):
                 else:
                     attn_mask = attn_mask[:,None].repeat((1,N,1,1))
 
-        q = self.q_proj(q).reshape(B,L,N,P).permute(0,2,1,3)
 
         q,k = self.emb_fxn(q,k, position_ids=position_ids)
 
@@ -1365,6 +1372,7 @@ class SimpleEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
         self.activation = activation
+        self.kv_identity = IdentityModule()
 
     def _ff_block(self, x: Tensor) -> Tensor:
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
@@ -1401,6 +1409,7 @@ class SimpleEncoderLayer(nn.Module):
                 optionally argue the position ids for the positional
                 encodings.
         """
+        kv = self.kv_identity(kv)
         ret_dict = self.self_attn(q, kv, kv,
                            attn_mask=attn_mask,
                            is_causal=is_causal,

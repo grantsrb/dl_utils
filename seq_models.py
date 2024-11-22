@@ -774,6 +774,7 @@ class Transformer(SequenceModule):
             learnable=self.learn_posencs,
         )
         self.layers = torch.nn.ModuleList([])
+        self.identities = torch.nn.ModuleList([])
         for el in range(self.n_layers):
             self.layers.append(encoder_layer_class(
                 d_model=self.d_model,
@@ -786,6 +787,7 @@ class Transformer(SequenceModule):
                 norm_first=True,
                 llama=kwargs.get("llama", False),
             ))
+            self.identities.append( tmods.IdentityModule() )
         self.decoder = nn.LayerNorm(self.d_model)
         self.lm_head = nn.Linear(self.d_model, self.n_tokens)
         self.init_weights()
@@ -926,6 +928,8 @@ class Transformer(SequenceModule):
                 position_ids=position_ids,
             )
             hidden_states = ret_dict["hidden_states"]
+            hidden_states = self.identities[i](hidden_states)
+
             if use_cache:
                 next_cache.append(ret_dict["past_key_value"])
             if output_attentions:

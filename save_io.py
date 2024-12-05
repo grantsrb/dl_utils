@@ -567,6 +567,13 @@ def get_save_folder(hyps, incl_full_path=False):
         )
     model_folder = "{}_{}".format( hyps["exp_name"], hyps["exp_num"] )
     model_folder += prep_search_keys(hyps.get("search_keys","_"))
+    if "exp_name" in model_folder:
+        splt = model_folder.split("exp_name")
+        right = splt[-1].split("_")
+        if len(right)>1:
+            model_folder = splt[0] + "_" + "_".join(right[1:])
+        else:
+            model_folder = splt[0]
     if incl_full_path: 
         return os.path.join(hyps["exp_folder"], model_folder)
     return model_folder

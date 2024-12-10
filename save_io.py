@@ -571,7 +571,7 @@ def get_save_folder(hyps, incl_full_path=False):
         splt = model_folder.split("exp_name")
         right = splt[-1].split("_")
         if len(right)>1:
-            model_folder = splt[0] + "_" + "_".join(right[1:])
+            model_folder = splt[0] + "_".join(right[1:])
         else:
             model_folder = splt[0]
     if incl_full_path: 

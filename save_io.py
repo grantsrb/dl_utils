@@ -165,6 +165,33 @@ def get_exp_num(path):
     """
     return foldersort(path)
 
+def get_exp_name(x):
+    """
+    Finds and returns the string before the experiment number from
+    the argued path.
+    
+    A sorting key function to order folder names with the format:
+    <path_to_folder>/<exp_name>_<exp_num>_<ending_folder_name>/
+
+    Assumes that the experiment number will always be the rightmost
+    occurance of an integer surrounded by underscores (i.e. _1_)
+
+    x: str
+    """
+    if x[-1] == "/": x = x[:-1]
+    splt = x.split("/")
+    if len(splt) > 1: splt = splt[-1].split("_")
+    else: splt = splt[0].split("_")
+    exp_num = None
+    for i,s in enumerate(reversed(splt)):
+        try:
+            exp_num = int(s)
+            break
+        except:
+            pass 
+    if exp_num is None: return None
+    else: return "_".join(splt[:-(i+1)])
+  
 def is_model_folder(path, exp_name=None, incl_empty=True):
     """
     checks to see if the argued path is a model folder or otherwise.

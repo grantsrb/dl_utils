@@ -660,23 +660,17 @@ def get_new_exp_num(exp_folder, exp_name, offset=0):
             return i+offset
     return len(exp_nums) + offset
 
-def load_json_or_yaml(file_name):
+def load_yaml(file_name):
     """
-    Loads a json or a yaml file (determined by its extension) as a python
-    dict.
+    Loads a yaml file as a python dict
 
-    Args:
-        file_name: str
-            the path of the json/yaml file
-    Returns:
-        d: dict
-            a dict representation of the loaded file
+    file_name: str
+        the path of the yaml file
     """
-    if ".json" in file_name:
-        return load_json(file_name)
-    elif ".yaml" in file_name:
-        return load_yaml(file_name)
-    raise NotImplemented
+    file_name = os.path.expanduser(file_name)
+    with open(file_name,'r') as f:
+        yam = yaml.safe_load(f)
+    return yam
 
 def load_json(file_name):
     """
@@ -740,17 +734,24 @@ def save_json(data, file_name):
                 failure = True
 
 
-def load_yaml(file_name):
-    """
-    Loads a yaml file as a python dict
 
-    file_name: str
-        the path of the yaml file
+def load_json_or_yaml(file_name):
     """
-    file_name = os.path.expanduser(file_name)
-    with open(file_name,'r') as f:
-        yam = yaml.safe_load(f)
-    return yam
+    Loads a json or a yaml file (determined by its extension) as a python
+    dict.
+
+    Args:
+        file_name: str
+            the path of the json/yaml file
+    Returns:
+        d: dict
+            a dict representation of the loaded file
+    """
+    if ".json" in file_name:
+        return load_json(file_name)
+    elif ".yaml" in file_name:
+        return load_yaml(file_name)
+    raise NotImplemented
 
 def record_session(config, model, globals_dict=None, verbose=False):
     """

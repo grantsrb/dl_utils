@@ -209,6 +209,7 @@ def pad_to(arr, tot_len, fill_val=0, side="right", dim=-1):
 
     Args:
         arr: list or ndarray or torch tensor
+            cannot take a mixture of datatypes
         tot_len: int
             the length of the resulting array
         fill_val: object

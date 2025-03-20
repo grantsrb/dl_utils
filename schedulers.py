@@ -71,4 +71,29 @@ class DecayScheduler(_LRScheduler):
         )
         return [float(lr)] * self.num_param_groups
 
+class PlateauTracker:
+    def __init__(self, **kwargs):
+        self.patience = kwargs.get("patience", 20)
+        self.plateau =  kwargs.get("plateau", 0.01)
+        self.measure =  kwargs.get("measure", "acc")
+        self.reset()
+
+    def reset(self):
+        self.best_val_loss = float("inf")
+        self.best_val_acc = 0.0
+        self.best_measure = self.best_val_acc if self.measure=="acc" else\
+                            self.best_val_loss
+        self.counter = 0
+
+    def update(self, val_loss, val_acc):
+        measure = val_acc if self.measure=="acc" else val_loss
+        if measure < (self.best_measure-self.plateau):
+            self.best_val_loss = val_loss
+            self.best_val_acc = val_acc
+            self.best_measure = val_acc if self.measure=="acc" else val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+        return self.counter >= self.patience
+
 

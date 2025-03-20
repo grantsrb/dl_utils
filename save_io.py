@@ -660,6 +660,10 @@ def get_new_exp_num(exp_folder, exp_name, offset=0):
             return i+offset
     return len(exp_nums) + offset
 
+def save_yaml(data, file_name):
+    with open(file_name, 'w') as outfile:
+        yaml.dump(data, outfile, default_flow_style=False)
+
 def load_yaml(file_name):
     """
     Loads a yaml file as a python dict

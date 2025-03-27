@@ -320,7 +320,7 @@ def get_model_folders(exp_folder, incl_full_path=False, incl_empty=True):
     if incl_full_path: folders = [os.path.expanduser(f) for f in folders]
     return sorted(folders, key=foldersort)
 
-def load_checkpoint(path, use_best=False):
+def load_checkpoint(path, use_best=False, ret_path=False):
     """
     Loads the save_dict into python. If the path is to a model_folder,
     the loaded checkpoint is the BEST checkpt if available, otherwise
@@ -331,6 +331,8 @@ def load_checkpoint(path, use_best=False):
             path to checkpoint file or model_folder
         use_best: bool
             if true, will load the best checkpt based on validation metrics
+        ret_path: bool
+            if true, will return the path used for the checkpoint
     Returns:
         checkpt: dict
             a dict that contains all the valuable information for the
@@ -357,6 +359,8 @@ def load_checkpoint(path, use_best=False):
         ext = path.split(".")[-1]
         data["epoch"] = int(path.split("."+ext)[0].split("_")[-1])
         torch.save(data, path) 
+    if ret_path:
+        return data, path
     return data
 
 def load_model(path, models, load_sd=True, use_best=False,

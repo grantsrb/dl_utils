@@ -3,6 +3,7 @@ import torch
 import os
 import sys
 import subprocess
+import collections
 from datetime import datetime
 try:
     import cv2
@@ -1073,6 +1074,52 @@ def rolling_window(array, window, time_axis=0):
     else:
         return arr
 
+def leading_zeros(string):
+    """
+    Calculates the number of leading zeros in a string that encodes
+    a number. Can be used to determine significant figures.
+    """
+    raw_val = int(float(string))
+    if raw_val>0: return 0
+    string = str(string).split(".")[-1]
+    for i,s in enumerate(string):
+        if s!="0": return i+1
+    return len(string)
+    
+def df_to_latex_str(df, sigfigs=collections.defaultdict(lambda: 4), ignores={"zipf_type"}):
+    """
+    Converts a pandas dataframe to a string that can be used to create a
+    table in latex.
+    
+    df: pandas dataframe
+    sigfigs: dict of ints
+        the number of significant figures for each column
+    ignores: set of str
+        columns to ignore
+    """
+    cols = df.columns
+    s = ""
+    for col in cols:
+        if col in ignores: continue
+        s += col + " & "
+    s = s[:-2] + " \\\\\n\hline\n"
+    for i in range(len(df)):
+        row = df.iloc[i]
+        line = ""
+        for col in cols:
+            if col in ignores: continue
+            if col==cols[-1]:
+                line += " " + str(round(row[col], sigfigs[col]))
+            else:
+                if row[col] is not None and str(row[col]) != "nan":
+                    try:
+                        line += " " + str(round(row[col], sigfigs[col])) + " &"
+                    except:
+                        line += " " + str(row[col]) + " &"
+                else:
+                    line +=  "    &"
+        s += line[:-1] + " \\\\\n\hline\n"
+    return s
 
 if __name__=="__main__":
     shape = (5,6)

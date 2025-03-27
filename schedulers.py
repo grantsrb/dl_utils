@@ -86,6 +86,8 @@ class PlateauTracker:
         self.counter = 0
 
     def update(self, val_loss, val_acc):
+        if self.patience is None or not self.plateau or self.plateau<=0:
+            return False
         measure = val_acc if self.measure=="acc" else val_loss
         if measure < (self.best_measure-self.plateau):
             self.best_val_loss = val_loss

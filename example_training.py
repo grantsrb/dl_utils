@@ -3,6 +3,7 @@ import transformers # Imported for versioning
 import datasets # Imported for versioning
 
 import numpy as np
+import pandas as pd
 import time
 from tqdm import tqdm
 import os
@@ -129,6 +130,15 @@ def train(rank, config, verbose=True, *args, **kwargs):
     #############################################################
     # Training
     #############################################################
+    df_dict = {
+        "epoch":         [],
+        "train_loss":    [],
+        "train_acc":     [],
+        "val_loss":      [],
+        "val_acc":       [],
+        "lr":            [],
+    }
+
     n_epochs = config.get("n_epochs", 100)
     for epoch in range(n_epochs):
         epochtime = time.time()
@@ -291,7 +301,13 @@ def train(rank, config, verbose=True, *args, **kwargs):
             val_loss = round(avg_loss/div, 5)
             val_acc =  round(avg_acc/div, 5)
             scheduler.step(val_loss)
-            if config["exp_name"]=="test": break
+
+            df_dict["epoch"].append(epoch)
+            df_dict["train_loss"].append(train_loss)
+            df_dict["train_acc"].append(train_acc)
+            df_dict["val_loss"].append(val_loss)
+            df_dict["val_acc"].append(val_acc)
+            df_dict["lr"].append(optimizer.param_groups[0]["lr"])
 
             if verbose:
                 examps = "Example Val Preds:\n"
@@ -340,6 +356,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
                 print(s)
                 print()
                 print()
+            if config["exp_name"]=="test": break
 
         ##############################################################
         #### SAVING
@@ -369,6 +386,7 @@ def train(rank, config, verbose=True, *args, **kwargs):
                     del_prev_sd=not keep_prev_sd
                 )
                 save_training_log(config, logstr)
+                save_training_csv(config, df_dict)
 
         # Clean up
         keys = list(package.keys())
@@ -393,6 +411,21 @@ def save_training_log(config, logstr, fname="training_log.txt", reset=False):
     mode = "w" if reset else "a"
     with open(os.path.join(config["save_folder"], fname),mode) as f:
         f.write(logstr)
+
+def save_training_csv(config,
+                      df_dict,
+                      fname="training_data.csv"):
+    """
+    Saves the logstr to the save folder under the name training_log.txt
+
+    config: dict
+    logstr: str
+        the string to save
+    fname: str
+        the name of the file to save to
+    """
+    path = os.path.join(config["save_folder"], fname)
+    pd.DataFrame(df_dict).to_csv(path, index=False, header=True)
 
 def config_error_catching(config):
     """

@@ -321,11 +321,12 @@ class Tokenizer():
 
         if word2id is None:
             word2id = {}
+        if id2word is None:
             id2word = {}
 
         for w in self.special_tokens.values():
-            if w not in word2id:
-                tid = len(word2id)
+            if w and w not in word2id:
+                tid = np.max(list(word2id.values()))+1
                 word2id[w] = tid
                 id2word[tid] = w
 

@@ -1,5 +1,6 @@
 import torch
 import pickle
+import copy
 import os
 import json
 import yaml
@@ -695,10 +696,32 @@ def load_json(file_name):
 
 def is_jsonable(x):
     try:
-        json.dumps(x)
+        json.dumps(x, ensure_ascii=False, indent=4)
         return True
     except (TypeError, OverflowError):
-        return False
+        pass
+    return False
+
+def make_jsonable(x):
+    if is_jsonable(x): return x
+    if type(x)==dict:
+        for k in list(x.keys()):
+            newk = make_jsonable(k)
+            x[newk] = make_jsonable(x[k])
+            if newk!=k or type(newk)!=type(k):
+                print("K:", k, x[k])
+                del x[k]
+    elif hasattr(x, "__len__"):
+        x = [make_jsonable(xx) for xx in x]
+    elif hasattr(x,"__name__"):
+        x = x.__name__
+    else:
+        try:
+            x = str(x)
+        except:
+            print("Removing", x, "from json")
+            x = ""
+    return x
 
 def save_json(data, file_name):
     """
@@ -712,36 +735,9 @@ def save_json(data, file_name):
     n_loops = 0
     while failure and n_loops<10*len(data):
         failure = False
-        n_loops += 1
-        try:
-            with open(file_name, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-        except (TypeError, OverflowError):
-            data = {**data}
-            keys = list(data.keys())
-            for k in keys:
-                if not is_jsonable(data[k]):
-                    if type(data[k])==dict:
-                        data = {**data, **data[k]}
-                        del data[k]
-                    elif type(data[k])==set:
-                        data[k] = list(data[k])
-                    elif hasattr(data[k],"__name__"):
-                        data[k] = data[k].__name__
-                    else:
-                        try:
-                            data[k] = str(data[k])
-                        except:
-                            del data[k]
-                            print("Removing", k, "from json")
-            try:
-                with open(file_name, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-            except:
-                print("trying again")
-                failure = True
-
-
+        jdata = make_jsonable(copy.deepcopy(data))
+        with open(file_name, 'w', encoding='utf-8') as f:
+            json.dump(jdata, f, ensure_ascii=False, indent=4)
 
 def load_json_or_yaml(file_name):
     """

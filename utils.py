@@ -1121,6 +1121,15 @@ def df_to_latex_str(df, sigfigs=collections.defaultdict(lambda: 4), ignores={"zi
         s += line[:-1] + " \\\\\n\\hline\n"
     return s
 
+def tensor2str(seq, n=2, delim=","):
+    """
+    seq: float or long tensor
+        must have numeric values
+    """
+    t = float if "float" in str(seq.dtype) else int
+    return delim.join( ["{:2}".format(str(t(s))[:n]) for s in seq] )
+
+
 if __name__=="__main__":
     shape = (5,6)
     sz = 10

@@ -1102,7 +1102,7 @@ def df_to_latex_str(df, sigfigs=collections.defaultdict(lambda: 4), ignores={"zi
     for col in cols:
         if col in ignores: continue
         s += col + " & "
-    s = s[:-2] + " \\\\\n\hline\n"
+    s = s[:-2] + " \\\\\n\\hline\n"
     for i in range(len(df)):
         row = df.iloc[i]
         line = ""
@@ -1118,7 +1118,7 @@ def df_to_latex_str(df, sigfigs=collections.defaultdict(lambda: 4), ignores={"zi
                         line += " " + str(row[col]) + " &"
                 else:
                     line +=  "    &"
-        s += line[:-1] + " \\\\\n\hline\n"
+        s += line[:-1] + " \\\\\n\\hline\n"
     return s
 
 if __name__=="__main__":

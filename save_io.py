@@ -349,7 +349,11 @@ def load_checkpoint(path, use_best=False, ret_path=False):
             checkpts = get_checkpoints(path)
             if len(checkpts)==0: return None
             path = checkpts[-1]
-    data = torch.load(path, map_location=torch.device("cpu"))
+    data = torch.load(
+        path,
+        map_location=torch.device("cpu"),
+        weights_only=False,
+    )
     data["loaded_path"] = path
     if "config" in data:
         data["hyps"] = data["config"]

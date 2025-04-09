@@ -1121,7 +1121,7 @@ def df_to_latex_str(df, sigfigs=collections.defaultdict(lambda: 4), ignores={"zi
         s += line[:-1] + " \\\\\n\\hline\n"
     return s
 
-def tensor2str(seq, n=2, delim=","):
+def tensor2str(seq, n=2, delim=" "):
     """
     seq: float or long tensor
         must have numeric values

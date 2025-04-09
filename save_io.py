@@ -817,8 +817,13 @@ def record_session(config, model, globals_dict=None, verbose=False):
         temp_hyps["packages"] = packages
     save_json(temp_hyps, os.path.join(sf,h+".json"))
 
+def get_folder_from_path(path):
+    if os.path.isdir(path): return path
+    return "/".join(path.split("/")[:-1])
+
 def get_num_duplicates(folder, fname, ext=".csv"):
     n_dupls = 0
+    folder = get_folder_from_path(folder)
     for f in os.listdir(folder):
         n_dupls += int(fname == f[:len(fname)] and ext in f)
     return n_dupls

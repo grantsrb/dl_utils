@@ -321,7 +321,7 @@ def get_model_folders(exp_folder, incl_full_path=False, incl_empty=True):
     if incl_full_path: folders = [os.path.expanduser(f) for f in folders]
     return sorted(folders, key=foldersort)
 
-def load_checkpoint(path, use_best=False, ret_path=False):
+def load_checkpoint(path, use_best=True, ret_path=False):
     """
     Loads the save_dict into python. If the path is to a model_folder,
     the loaded checkpoint is the BEST checkpt if available, otherwise

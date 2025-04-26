@@ -1129,6 +1129,8 @@ def tensor2str(seq, n=2, delim=" "):
     t = float if "float" in str(seq.dtype) else int
     return delim.join( ["{:2}".format(str(t(s))[:n]) for s in seq] )
 
+def is_float(x):
+    return "." in x and x.replace(".", "").isnumeric():
 
 if __name__=="__main__":
     shape = (5,6)

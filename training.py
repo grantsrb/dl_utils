@@ -9,7 +9,60 @@ import shutil
 import copy
 import torch.multiprocessing as mp
 
-import dl_utils.save_io as io
+try:
+    import dl_utils.save_io as io
+except:
+    sys.path.append("../")
+    import dl_utils.save_io as io
+
+def parse_type(val):
+    """
+    Determines the appropriate data type for the argued string value.
+
+    Args:
+        val: str
+    Returns:
+        val: any
+    """
+    if val.lower() in {"none", "null", "na"}:
+        val = None
+    elif "," in val:
+        val = [parse_type(v) for v in val.split(",") if v!=""]
+    elif val.lower()=="true":
+        val = True
+    elif val.lower()=="false":
+        val = False
+    elif val.isnumeric():
+        val = int(val)
+    elif val.replace(".", "").isnumeric():
+        val = float(val)
+    return val
+
+def read_command_line_args(args=None):
+    if args is None: args = sys.argv[1:]
+    model_folders = []
+    command_args = []
+    command_kwargs = dict()
+
+    for arg in args:
+        if io.is_model_folder(arg):
+            model_folders.append(arg)
+        elif io.is_exp_folder(arg):
+            mfs = io.get_model_folders(
+                arg, incl_full_path=True, incl_empty=False)
+            for f in mfs:
+                model_folders.append(f)
+        elif "checkpt" in arg and ".pt" in arg:
+            model_folders.append(arg)
+        elif ".yaml" in arg or ".json" in arg:
+            command_kwargs = {**command_kwargs,
+                              **io.load_json_or_yaml(arg)}
+        elif "=" in arg:
+            key,val = arg.split("=")
+            command_kwargs[key] = parse_type(val)
+        else:
+            command_args.append(arg)
+    return model_folders, command_args, command_kwargs
 
 def config_error_catching(config):
     """
@@ -453,4 +506,13 @@ def run_training(train_fxn):
 
         hyper_search(config, ranges, train_fxn)
     print("Total Execution Time:", time.time() - start_time)
+
+if __name__=="__main__":
+    mfs, args, kwargs = read_command_line_args()
+    print("ModelFolders:", mfs)
+    print("CommandArgs:", args)
+    print("CommandKwargs:")
+    for k,v in kwargs.items():
+        print(k, type(v), v)
+        if type(v)==list: print("\t", [type(vv) for vv in v])
 
